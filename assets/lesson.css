@@ -1,0 +1,137 @@
+/* lesson.css — shared stylesheet for all C++ OOP lessons.
+   Tufte-inspired: generous margins, readable serif, restrained palette.
+   Linked by every lesson and reference doc so the course looks unified. */
+
+:root {
+  --ink:        #1a1a1a;
+  --paper:      #fdfcf8;
+  --muted:      #6b6b6b;
+  --rule:       #e2ddd0;
+  --accent:     #7a2e2e;   /* deep brick red */
+  --accent-bg:  #f4ece4;
+  --code-bg:    #f3f1ea;
+  --good:       #2f6b3a;
+  --bad:        #9a3b3b;
+  --measure:    38rem;
+}
+
+* { box-sizing: border-box; }
+
+html { font-size: 18px; }
+
+body {
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  color: var(--ink);
+  background: var(--paper);
+  line-height: 1.55;
+  margin: 0;
+  padding: 3rem 1.5rem 6rem;
+}
+
+.wrap { max-width: var(--measure); margin: 0 auto; }
+
+/* ---- Header ---- */
+.kicker {
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 0.72rem;
+  color: var(--accent);
+  font-weight: 600;
+}
+h1 { font-size: 2rem; line-height: 1.15; margin: 0.2rem 0 0.6rem; }
+h2 {
+  font-size: 1.3rem;
+  margin: 2.4rem 0 0.6rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid var(--rule);
+}
+h3 { font-size: 1.05rem; margin: 1.6rem 0 0.4rem; }
+p, li { font-size: 1.02rem; }
+.subtitle { color: var(--muted); font-style: italic; margin-top: 0; }
+
+a { color: var(--accent); text-underline-offset: 2px; }
+
+/* ---- Code ---- */
+code, pre {
+  font-family: "SF Mono", "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 0.86rem;
+}
+code { background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 3px; }
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  padding: 1rem 1.1rem;
+  overflow-x: auto;
+  line-height: 1.45;
+}
+pre code { background: none; padding: 0; }
+.cm { color: var(--muted); font-style: italic; }  /* code comment span */
+
+/* ---- Callouts ---- */
+.note, .aside {
+  background: var(--accent-bg);
+  border-radius: 5px;
+  padding: 0.9rem 1.1rem;
+  margin: 1.4rem 0;
+  font-size: 0.95rem;
+}
+.aside { border-left: 3px solid var(--muted); }
+.note  { border-left: 3px solid var(--accent); }
+.label {
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-weight: 700; font-size: 0.7rem; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--accent); display: block;
+  margin-bottom: 0.3rem;
+}
+
+/* ---- Sidenote-ish citation ---- */
+.cite { font-size: 0.82rem; color: var(--muted); }
+
+/* ---- Quiz widget ---- */
+.quiz { margin: 1.4rem 0; }
+.quiz .q { font-weight: 600; margin-bottom: 0.7rem; }
+.quiz .opt {
+  display: block; width: 100%; text-align: left;
+  font: inherit; font-size: 0.98rem;
+  background: #fff; border: 1px solid var(--rule);
+  border-radius: 5px; padding: 0.6rem 0.9rem; margin: 0.4rem 0;
+  cursor: pointer; transition: background 0.12s, border-color 0.12s;
+}
+.quiz .opt:hover { background: var(--accent-bg); }
+.quiz .opt.correct { border-color: var(--good); background: #eaf3ec; }
+.quiz .opt.wrong   { border-color: var(--bad);  background: #f6eaea; }
+.quiz .fb {
+  margin-top: 0.5rem; font-size: 0.92rem; min-height: 1.2rem;
+  padding-left: 0.2rem;
+}
+.quiz .fb.good { color: var(--good); }
+.quiz .fb.bad  { color: var(--bad); }
+
+/* ---- Task box ---- */
+.task {
+  border: 1px dashed var(--accent);
+  border-radius: 6px; padding: 1rem 1.2rem; margin: 1.6rem 0;
+  background: #fffdf9;
+}
+.task h3 { margin-top: 0; }
+
+/* ---- Footer nav ---- */
+.foot {
+  margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule);
+  font-size: 0.9rem; color: var(--muted);
+  display: flex; flex-wrap: wrap; gap: 1rem; justify-content: space-between;
+}
+.pill {
+  font-family: ui-sans-serif, system-ui, sans-serif; font-size: 0.7rem;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
+}
+
+/* ---- Print ---- */
+@media print {
+  body { background: #fff; padding: 1rem; }
+  .quiz .opt { break-inside: avoid; }
+  a { color: var(--ink); text-decoration: none; }
+}
