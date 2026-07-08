@@ -10,7 +10,13 @@ from django.conf import settings
 from workspaces.models import ChatSession, Message, Workspace
 from workspaces.services.response_mapper import AgentTurnResult, map_turn
 from workspaces.services.seeding import SAMPLE_LESSON_HTML
-from workspaces.storage import get_storage
+from workspaces.storage import (
+    ensure_local_workspace_dirs,
+    get_storage,
+    is_s3_backend,
+    sync_local_to_s3,
+    sync_s3_to_local,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +63,14 @@ class AgentService:
         user_content: str,
     ) -> AgentTurnResult:
         storage = get_storage()
-        before = storage.snapshot(str(workspace.id))
+        workspace_id = str(workspace.id)
+
+        # Agent SDK needs a real filesystem cwd. When using S3, mirror into local cache.
+        if is_s3_backend():
+            ensure_local_workspace_dirs(workspace_id)
+            sync_s3_to_local(workspace_id)
+
+        before = storage.snapshot(workspace_id)
         # #region agent log
         _debug_log(
             "H1",
@@ -65,7 +78,8 @@ class AgentService:
             "run_turn started",
             {
                 "fixture_mode": settings.AGENT_FIXTURE_MODE,
-                "workspace_id": str(workspace.id),
+                "workspace_id": workspace_id,
+                "storage_backend": settings.STORAGE_BACKEND,
                 "permission_mode": settings.AGENT_PERMISSION_MODE,
                 "before_files": sorted(before.keys()),
                 "before_count": len(before),
@@ -78,7 +92,17 @@ class AgentService:
         else:
             result = self._run_with_timeout(workspace, session, user_content)
 
-        after = storage.snapshot(str(workspace.id))
+        # Persist agent filesystem writes back to S3 after the turn.
+        if is_s3_backend() and not settings.AGENT_FIXTURE_MODE:
+            uploaded = sync_local_to_s3(workspace_id)
+            _debug_log(
+                "H4",
+                "agent.py:run_turn:s3_sync",
+                "synced local workspace to S3",
+                {"uploaded_count": len(uploaded), "uploaded": uploaded[:20]},
+            )
+
+        after = storage.snapshot(workspace_id)
         turn_result = map_turn(
             str(workspace.id),
             result["text"],

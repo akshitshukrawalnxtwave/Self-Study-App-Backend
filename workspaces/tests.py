@@ -1,16 +1,22 @@
 import json
 import uuid
 
-from django.test import Client, TestCase
+from django.test import Client, TestCase, override_settings
+from moto import mock_aws
 
 from workspaces.models import ChatSession, Workspace
 from workspaces.services.agent import agent_service
-from workspaces.storage import get_storage
+from workspaces.storage import get_storage, reset_storage
+from workspaces.storage.s3 import S3WorkspaceStorage
 
 
 class WorkspaceAPITests(TestCase):
     def setUp(self):
         self.client = Client()
+        reset_storage()
+
+    def tearDown(self):
+        reset_storage()
 
     def test_list_workspaces_empty(self):
         response = self.client.get("/api/workspaces/")
@@ -175,3 +181,62 @@ class AgentServiceTests(TestCase):
 
         options = agent_service._build_sdk_options(workspace, session)
         self.assertEqual(options.resume, "existing-sdk-session-id")
+
+
+@mock_aws
+@override_settings(
+    STORAGE_BACKEND="s3",
+    AWS_S3_BUCKET_NAME="test-self-study-bucket",
+    AWS_S3_REGION="us-east-1",
+    AWS_S3_KEY_PREFIX="workspaces",
+    AWS_ACCESS_KEY_ID="testing",
+    AWS_SECRET_ACCESS_KEY="testing",
+)
+class S3WorkspaceStorageTests(TestCase):
+    def setUp(self):
+        import boto3
+
+        reset_storage()
+        self.client_s3 = boto3.client("s3", region_name="us-east-1")
+        self.client_s3.create_bucket(Bucket="test-self-study-bucket")
+        self.storage = S3WorkspaceStorage()
+        self.ws_id = str(uuid.uuid4())
+
+    def tearDown(self):
+        reset_storage()
+
+    def test_write_read_exists_list_snapshot(self):
+        self.storage.write(self.ws_id, "lessons/0001.html", "<html>hi</html>")
+        self.storage.write(self.ws_id, "MISSION.md", "# Mission\n")
+
+        self.assertTrue(self.storage.exists(self.ws_id, "lessons/0001.html"))
+        self.assertFalse(self.storage.exists(self.ws_id, "missing.html"))
+        self.assertEqual(
+            self.storage.read(self.ws_id, "lessons/0001.html"), "<html>hi</html>"
+        )
+        self.assertEqual(
+            self.storage.list(self.ws_id, "lessons"),
+            ["lessons/0001.html"],
+        )
+        snap = self.storage.snapshot(self.ws_id)
+        self.assertIn("lessons/0001.html", snap)
+        self.assertIn("MISSION.md", snap)
+
+    def test_api_create_and_serve_via_s3(self):
+        reset_storage()
+        http = Client()
+        response = http.post(
+            "/api/workspaces/",
+            data=json.dumps({"title": "S3 Topic", "topic_slug": "s3-topic"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201)
+        ws_id = response.json()["id"]
+
+        storage = get_storage()
+        self.assertIsInstance(storage, S3WorkspaceStorage)
+        self.assertTrue(storage.exists(ws_id, "assets/lesson.css"))
+
+        served = http.get(f"/workspaces/{ws_id}/assets/lesson.css")
+        self.assertEqual(served.status_code, 200)
+        self.assertIn("text/css", served["Content-Type"])

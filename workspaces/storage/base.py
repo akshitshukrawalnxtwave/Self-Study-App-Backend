@@ -26,3 +26,7 @@ class WorkspaceStorage(ABC):
     def snapshot(self, workspace_id: str) -> dict[str, float]:
         """Return {relative_path: mtime} for all files in the workspace."""
         ...
+
+    @abstractmethod
+    def read_bytes(self, workspace_id: str, path: str) -> bytes:
+        ...

@@ -127,6 +127,14 @@ STATIC_URL = 'static/'
 WORKSPACES_ROOT = BASE_DIR / 'workspaces_data'
 CLAUDE_SKILLS_ROOT = BASE_DIR / '.claude'
 
+# Storage: "local" (default) or "s3"
+STORAGE_BACKEND = os.environ.get('STORAGE_BACKEND', 'local').lower()
+AWS_S3_BUCKET_NAME = os.environ.get('AWS_S3_BUCKET_NAME', '')
+AWS_S3_REGION = os.environ.get('AWS_S3_REGION', 'us-east-1')
+AWS_S3_KEY_PREFIX = os.environ.get('AWS_S3_KEY_PREFIX', 'workspaces')
+AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID', '')
+AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY', '')
+
 AGENT_FIXTURE_MODE = os.environ.get('AGENT_FIXTURE_MODE', 'true').lower() == 'true'
 AGENT_TIMEOUT_SECONDS = int(os.environ.get('AGENT_TIMEOUT_SECONDS', '300'))
 # Headless Django server cannot answer interactive permission prompts — use bypassPermissions.
