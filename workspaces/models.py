@@ -15,6 +15,7 @@ class Workspace(models.Model):
         ordering = ["-created_at"]
 
     def to_dict(self):
+        """Serialize the workspace for API responses."""
         return {
             "id": str(self.id),
             "title": self.title,
@@ -54,6 +55,7 @@ class Message(models.Model):
         ordering = ["created_at"]
 
     def to_dict(self):
+        """Serialize the message for API responses."""
         return {
             "id": str(self.id),
             "role": self.role,
@@ -61,3 +63,38 @@ class Message(models.Model):
             "content": self.content,
             "created_at": self.created_at.isoformat().replace("+00:00", "Z"),
         }
+
+
+class Lesson(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(
+        Workspace, on_delete=models.CASCADE, related_name="lessons"
+    )
+    title = models.CharField(max_length=255)
+    path = models.CharField(max_length=512)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "path"],
+                name="unique_lesson_path_per_workspace",
+            )
+        ]
+
+    @property
+    def html_url(self) -> str:
+        """Frontend-facing URL for this lesson's HTML (presigned on S3)."""
+        from workspaces.services.lessons import lesson_html_url
+
+        return lesson_html_url(str(self.workspace_id), self.path)
+
+    def to_list_dict(self) -> dict:
+        """Compact serialization for the lesson list endpoint."""
+        return {"id": str(self.id), "title": self.title}
+
+    def to_detail_dict(self) -> dict:
+        """Full serialization including the lesson HTML URL."""
+        return {"id": str(self.id), "title": self.title, "html_url": self.html_url}

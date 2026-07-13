@@ -4,15 +4,56 @@ from django.conf import settings
 
 from workspaces.storage import get_storage
 
+SEED_ASSET_NAMES = ("lesson.css", "quiz.js")
+PROTECTED_SEED_ASSET_PATHS = frozenset(f"assets/{name}" for name in SEED_ASSET_NAMES)
+
+
+def _sanitize_seed_content(name: str, content: str) -> str:
+    """Strip accidental Python string wrappers the agent may have written."""
+    stripped = content.strip()
+    if stripped.startswith('"""') and stripped.endswith('"'):
+        stripped = stripped[3:-1].strip()
+    elif stripped.startswith('"""') and stripped.endswith('"""'):
+        stripped = stripped[3:-3].strip()
+    elif stripped.startswith('"') and stripped.endswith('"') and name.endswith(".css"):
+        stripped = stripped[1:-1].strip()
+    return stripped
+
 
 def seed_workspace_assets(workspace_id: str) -> None:
+    """Write the shared lesson.css and quiz.js into a workspace's assets/ folder."""
     storage = get_storage()
-    storage.ensure_workspace(workspace_id)
+    seed_dir = Path(__file__).resolve().parent.parent / "seed_assets"
+    for name in SEED_ASSET_NAMES:
+        content = _sanitize_seed_content(
+            name, (seed_dir / name).read_text(encoding="utf-8")
+        )
+        storage.write(workspace_id, f"assets/{name}", content)
+
+
+def ensure_workspace_asset(workspace_id: str, path: str) -> bool:
+    """Backfill missing seed assets (e.g. workspace created before S3 upload)."""
+    if not path.startswith("assets/"):
+        return False
+    name = path.removeprefix("assets/")
+    if name not in SEED_ASSET_NAMES:
+        return False
+
+    storage = get_storage()
+    if storage.exists(workspace_id, path):
+        return True
 
     seed_dir = Path(__file__).resolve().parent.parent / "seed_assets"
-    for name in ("lesson.css", "quiz.js"):
-        content = (seed_dir / name).read_text(encoding="utf-8")
-        storage.write(workspace_id, f"assets/{name}", content)
+    seed_file = seed_dir / name
+    if not seed_file.is_file():
+        return False
+
+    storage.write(
+        workspace_id,
+        path,
+        _sanitize_seed_content(name, seed_file.read_text(encoding="utf-8")),
+    )
+    return True
 
 
 SAMPLE_LESSON_HTML = """<!DOCTYPE html>

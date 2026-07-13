@@ -1,23 +1,35 @@
+import logging
 import mimetypes
 import uuid
 
 from django.http import Http404, HttpResponse, JsonResponse
+from django.views.decorators.clickjacking import xframe_options_exempt
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods
 
-from workspaces.models import ChatSession, Message, Workspace
+from workspaces.models import ChatSession, Lesson, Message, Workspace
 from workspaces.services.agent import AgentError, AgentTimeoutError, agent_service
-from workspaces.services.seeding import seed_workspace_assets
-from workspaces.storage import get_storage
+from workspaces.services.lessons import (
+    register_lessons_from_artifacts,
+    sync_lessons_from_storage,
+)
+from workspaces.services.seeding import ensure_workspace_asset, seed_workspace_assets
+from workspaces.services.workspace_files import (
+    apply_workspace_file_headers,
+    rewrite_workspace_asset_refs,
+)
+from workspaces.storage import get_storage, prune_orphan_workspace_dirs
 from workspaces.utils import (
     error_response,
-    lesson_title_from_path,
     parse_json_body,
     turn_to_dict,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def _get_workspace_or_404(workspace_id: str) -> Workspace:
+    """Fetch a workspace by ID or raise 404 if it doesn't exist."""
     try:
         return Workspace.objects.get(pk=workspace_id)
     except (Workspace.DoesNotExist, ValueError):
@@ -25,6 +37,7 @@ def _get_workspace_or_404(workspace_id: str) -> Workspace:
 
 
 def _get_active_session(workspace: Workspace) -> ChatSession:
+    """Return the workspace's active chat session, creating one if needed."""
     session = workspace.sessions.filter(is_active=True).first()
     if session:
         return session
@@ -33,6 +46,8 @@ def _get_active_session(workspace: Workspace) -> ChatSession:
 
 @require_GET
 def list_workspaces(request):
+    """GET /api/workspaces/ — list all workspaces as JSON."""
+    prune_orphan_workspace_dirs()
     workspaces = Workspace.objects.all()
     return JsonResponse([w.to_dict() for w in workspaces], safe=False)
 
@@ -40,6 +55,7 @@ def list_workspaces(request):
 @csrf_exempt
 @require_http_methods(["GET", "POST"])
 def workspaces_collection(request):
+    """GET lists workspaces; POST creates one (seeded with shared assets)."""
     if request.method == "GET":
         return list_workspaces(request)
 
@@ -67,25 +83,37 @@ def workspaces_collection(request):
 
 @require_GET
 def list_lessons(request, workspace_id):
+    """GET /api/workspaces/{id}/lessons/ — list lessons (synced from storage)."""
     workspace = _get_workspace_or_404(workspace_id)
-    storage = get_storage()
-    paths = storage.list(str(workspace.id), "lessons")
-    html_paths = [p for p in paths if p.endswith(".html")]
+    sync_lessons_from_storage(workspace)
+    lessons = workspace.lessons.all()
+    return JsonResponse([lesson.to_list_dict() for lesson in lessons], safe=False)
 
-    lessons = []
-    for path in sorted(html_paths):
-        lessons.append(
-            {
-                "url": f"/workspaces/{workspace.id}/{path}",
-                "path": path,
-                "title": lesson_title_from_path(path),
-            }
-        )
-    return JsonResponse(lessons, safe=False)
+
+@require_GET
+def get_lesson(request, workspace_id, lesson_id):
+    """GET lesson detail — returns { html_url } with fresh presigned links on S3."""
+    workspace = _get_workspace_or_404(workspace_id)
+    try:
+        lesson = workspace.lessons.get(pk=lesson_id)
+    except (Lesson.DoesNotExist, ValueError):
+        raise Http404
+
+    storage = get_storage()
+    if not storage.exists(str(workspace.id), lesson.path):
+        raise Http404
+
+    from workspaces.storage.s3 import S3WorkspaceStorage
+
+    if isinstance(storage, S3WorkspaceStorage):
+        storage.refresh_lesson_html_urls(str(workspace.id), lesson.path)
+
+    return JsonResponse({"html_url": lesson.html_url})
 
 
 @require_GET
 def list_messages(request, workspace_id):
+    """GET /api/workspaces/{id}/messages/ — chat history for the active session."""
     workspace = _get_workspace_or_404(workspace_id)
     session = workspace.sessions.filter(is_active=True).first()
     if not session:
@@ -98,6 +126,7 @@ def list_messages(request, workspace_id):
 @csrf_exempt
 @require_http_methods(["POST"])
 def chat(request, workspace_id):
+    """POST a user message, run an agent turn, and return the turn result."""
     workspace = _get_workspace_or_404(workspace_id)
 
     body = parse_json_body(request)
@@ -125,6 +154,9 @@ def chat(request, workspace_id):
         return error_response(str(exc), "AGENT_TIMEOUT", 504)
     except AgentError as exc:
         return error_response(str(exc), "INTERNAL_ERROR", 500)
+    except Exception as exc:
+        logger.exception("Unexpected error during chat turn")
+        return error_response(str(exc), "INTERNAL_ERROR", 500)
 
     Message.objects.create(
         session=session,
@@ -133,15 +165,19 @@ def chat(request, workspace_id):
         turn_id=turn_id,
     )
 
-    if result.panel_html_url:
-        workspace.last_panel_html_url = result.panel_html_url
+    if result.panel_lesson_path:
+        workspace.last_panel_html_url = result.panel_lesson_path
         workspace.save(update_fields=["last_panel_html_url"])
+
+    register_lessons_from_artifacts(workspace, result.artifacts)
 
     return JsonResponse(turn_to_dict(turn_id, result))
 
 
+@xframe_options_exempt
 @require_GET
 def serve_workspace_file(request, workspace_id, file_path):
+    """Serve a workspace file from storage (Django proxy for local/cloud modes)."""
     _get_workspace_or_404(workspace_id)
 
     if ".." in file_path.split("/"):
@@ -150,12 +186,19 @@ def serve_workspace_file(request, workspace_id, file_path):
     storage = get_storage()
     try:
         if not storage.exists(workspace_id, file_path):
+            ensure_workspace_asset(workspace_id, file_path)
+        if not storage.exists(workspace_id, file_path):
             raise Http404
         data = storage.read_bytes(workspace_id, file_path)
     except ValueError:
         return error_response("Path traversal not allowed", "FORBIDDEN", 403)
     except FileNotFoundError:
         raise Http404
+
+    is_html = file_path.endswith(".html")
+    if is_html:
+        html = data.decode("utf-8")
+        data = rewrite_workspace_asset_refs(html, workspace_id).encode("utf-8")
 
     content_type, _ = mimetypes.guess_type(file_path)
     if content_type is None:
@@ -167,6 +210,5 @@ def serve_workspace_file(request, workspace_id, file_path):
         content_type = f"{content_type}; charset=utf-8"
 
     response = HttpResponse(data, content_type=content_type)
-    if file_path.endswith(".html"):
-        response["X-Frame-Options"] = "SAMEORIGIN"
+    apply_workspace_file_headers(response, request, is_html=is_html)
     return response

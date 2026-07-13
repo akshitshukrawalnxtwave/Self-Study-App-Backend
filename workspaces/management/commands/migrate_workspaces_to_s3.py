@@ -16,6 +16,7 @@ class Command(BaseCommand):
     )
 
     def add_arguments(self, parser):
+        """Register --workspace-id and --dry-run options."""
         parser.add_argument(
             "--workspace-id",
             help="Migrate only this workspace ID (default: all under WORKSPACES_ROOT)",
@@ -27,6 +28,7 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        """Upload every file under workspaces_data/ to the S3 bucket."""
         if not is_s3_backend():
             raise CommandError(
                 "Set STORAGE_BACKEND=s3 in .env before migrating to S3."

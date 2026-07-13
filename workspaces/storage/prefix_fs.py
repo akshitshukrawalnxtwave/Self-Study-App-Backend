@@ -1,17 +1,25 @@
+from __future__ import annotations
+
 import os
 from pathlib import Path
-
-from django.conf import settings
 
 from .base import WorkspaceStorage
 
 
-class LocalWorkspaceStorage(WorkspaceStorage):
-    """Workspace files stored directly under workspaces_data/{workspace_id}/."""
+class PrefixFilesystemStorage(WorkspaceStorage):
+    """Filesystem storage with S3-like layout: {base}/{prefix}/{workspace_id}/{path}."""
+
+    def __init__(self, base_root: Path, key_prefix: str = "workspaces") -> None:
+        self.base_root = Path(base_root)
+        self.key_prefix = key_prefix.strip("/")
 
     def _workspace_root(self, workspace_id: str) -> Path:
-        """Filesystem root for a workspace's files."""
-        return Path(settings.WORKSPACES_ROOT) / workspace_id
+        """Filesystem root for a workspace: {base}/{prefix}/{workspace_id}/."""
+        parts = [self.base_root]
+        if self.key_prefix:
+            parts.append(self.key_prefix)
+        parts.append(workspace_id)
+        return Path(*parts)
 
     def _resolve_path(self, workspace_id: str, path: str) -> Path:
         """Resolve a relative path inside the workspace, rejecting traversal."""
@@ -29,14 +37,24 @@ class LocalWorkspaceStorage(WorkspaceStorage):
 
     def read(self, workspace_id: str, path: str) -> str:
         """Read a workspace file as UTF-8 text."""
+        return self.read_bytes(workspace_id, path).decode("utf-8")
+
+    def read_bytes(self, workspace_id: str, path: str) -> bytes:
+        """Read a workspace file as raw bytes; raise FileNotFoundError if missing."""
         full = self._resolve_path(workspace_id, path)
-        return full.read_text(encoding="utf-8")
+        if not full.is_file():
+            raise FileNotFoundError(path)
+        return full.read_bytes()
 
     def write(self, workspace_id: str, path: str, content: str) -> None:
-        """Write UTF-8 text, creating parent directories as needed."""
+        """Write UTF-8 text to a workspace file."""
+        self.write_bytes(workspace_id, path, content.encode("utf-8"))
+
+    def write_bytes(self, workspace_id: str, path: str, content: bytes) -> None:
+        """Write raw bytes, creating parent directories as needed."""
         full = self._resolve_path(workspace_id, path)
         full.parent.mkdir(parents=True, exist_ok=True)
-        full.write_text(content, encoding="utf-8")
+        full.write_bytes(content)
 
     def list(self, workspace_id: str, prefix: str) -> list[str]:
         """List relative file paths under the given prefix."""
@@ -59,7 +77,7 @@ class LocalWorkspaceStorage(WorkspaceStorage):
     def exists(self, workspace_id: str, path: str) -> bool:
         """Check whether a workspace file exists (False on invalid paths)."""
         try:
-            return self._resolve_path(workspace_id, path).exists()
+            return self._resolve_path(workspace_id, path).is_file()
         except ValueError:
             return False
 
@@ -75,14 +93,3 @@ class LocalWorkspaceStorage(WorkspaceStorage):
                 rel = full.relative_to(root)
                 result[str(rel).replace(os.sep, "/")] = full.stat().st_mtime
         return result
-
-    def read_bytes(self, workspace_id: str, path: str) -> bytes:
-        """Read a workspace file as raw bytes."""
-        full = self._resolve_path(workspace_id, path)
-        return full.read_bytes()
-
-    def write_bytes(self, workspace_id: str, path: str, content: bytes) -> None:
-        """Write raw bytes, creating parent directories as needed."""
-        full = self._resolve_path(workspace_id, path)
-        full.parent.mkdir(parents=True, exist_ok=True)
-        full.write_bytes(content)

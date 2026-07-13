@@ -1,4 +1,5 @@
 workspaces_data/
+workspaces_cloud/
 db.sqlite3
 __pycache__/
 *.pyc

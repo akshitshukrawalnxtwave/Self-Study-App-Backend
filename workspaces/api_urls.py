@@ -10,6 +10,11 @@ urlpatterns = [
         name="workspace-lessons",
     ),
     path(
+        "workspaces/<uuid:workspace_id>/lessons/<uuid:lesson_id>/",
+        views.get_lesson,
+        name="workspace-lesson-detail",
+    ),
+    path(
         "workspaces/<uuid:workspace_id>/messages/",
         views.list_messages,
         name="workspace-messages",

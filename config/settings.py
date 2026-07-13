@@ -124,19 +124,161 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 
+# Agent local working copy (LRU cache when using cloud/s3 backends).
 WORKSPACES_ROOT = BASE_DIR / 'workspaces_data'
+# Filesystem stand-in for S3 during testing (STORAGE_BACKEND=cloud).
+WORKSPACES_CLOUD_ROOT = BASE_DIR / 'workspaces_cloud'
 CLAUDE_SKILLS_ROOT = BASE_DIR / '.claude'
 
-# Storage: "local" (default) or "s3"
+# Storage: "local" (default), "cloud" (fake S3 on disk), or "s3" (AWS).
 STORAGE_BACKEND = os.environ.get('STORAGE_BACKEND', 'local').lower()
+WORKSPACE_AGENT_CACHE_MAX_SIZE = int(
+    os.environ.get('WORKSPACE_AGENT_CACHE_MAX_SIZE', '10')
+)
 AWS_S3_BUCKET_NAME = os.environ.get('AWS_S3_BUCKET_NAME', '')
 AWS_S3_REGION = os.environ.get('AWS_S3_REGION', 'us-east-1')
 AWS_S3_KEY_PREFIX = os.environ.get('AWS_S3_KEY_PREFIX', 'workspaces')
 AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID', '')
 AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY', '')
+AWS_S3_PUBLIC_BASE_URL = os.environ.get('AWS_S3_PUBLIC_BASE_URL', '').rstrip('/')
+AWS_S3_PRESIGNED_URL_EXPIRY_SECONDS = int(
+    os.environ.get('AWS_S3_PRESIGNED_URL_EXPIRY_SECONDS', '3600')
+)
 
 AGENT_FIXTURE_MODE = os.environ.get('AGENT_FIXTURE_MODE', 'true').lower() == 'true'
 AGENT_TIMEOUT_SECONDS = int(os.environ.get('AGENT_TIMEOUT_SECONDS', '300'))
 # Headless Django server cannot answer interactive permission prompts — use bypassPermissions.
 AGENT_PERMISSION_MODE = os.environ.get('AGENT_PERMISSION_MODE', 'bypassPermissions')
 AGENT_MAX_TURNS = int(os.environ.get('AGENT_MAX_TURNS', '25'))
+
+# Optional absolute prefix for workspace URLs (leave empty for Vite /workspaces proxy).
+WORKSPACES_PUBLIC_BASE_URL = os.environ.get(
+    'WORKSPACES_PUBLIC_BASE_URL', ''
+).rstrip('/')
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get(
+        'CORS_ALLOWED_ORIGINS',
+        'http://localhost:5173,http://127.0.0.1:5173',
+    ).split(',')
+    if origin.strip()
+]
+
+# Agent LLM provider:
+#   anthropic     — Claude API (ANTHROPIC_API_KEY)
+#   mantle        — Amazon Bedrock Mantle (recommended; matches Bedrock console projects)
+#   bedrock       — classic Amazon Bedrock InvokeModel
+#   anthropic_aws — Claude Platform on AWS (legacy workspace routing)
+AGENT_PROVIDER = os.environ.get('AGENT_PROVIDER', 'anthropic').lower()
+# Model alias passed to Claude Agent SDK: sonnet | opus | haiku (or a Mantle model ID).
+AGENT_MODEL = os.environ.get('AGENT_MODEL', 'sonnet')
+
+_ANTHROPIC_AWS_WORKSPACE_ID = (
+    os.environ.get('ANTHROPIC_AWS_WORKSPACE_ID', '').strip()
+    or os.environ.get('ANTHROPIC_WORKSPACE_ID', '').strip()
+)
+_MANTLE_BASE_URL = (
+    os.environ.get('ANTHROPIC_BEDROCK_MANTLE_BASE_URL', '').strip()
+    or os.environ.get('ANTHROPIC_BASE_URL', '').strip()
+)
+_BEDROCK_API_KEY = (
+    os.environ.get('AWS_BEARER_TOKEN_BEDROCK', '').strip()
+    or os.environ.get('ANTHROPIC_API_KEY', '').strip()
+)
+
+def _use_mantle_provider() -> bool:
+    if AGENT_PROVIDER == 'mantle':
+        return True
+    if os.environ.get('CLAUDE_CODE_USE_MANTLE', '').strip().lower() in ('1', 'true'):
+        return True
+    if 'bedrock-mantle' in _MANTLE_BASE_URL:
+        return True
+    return _BEDROCK_API_KEY.startswith('bedrock-api-key-')
+
+
+# Env vars injected into the Claude Agent SDK subprocess for AWS-backed providers.
+AGENT_SDK_ENV: dict[str, str] = {}
+_AWS_AGENT_PROVIDERS = ('bedrock', 'anthropic_aws', 'mantle')
+if AGENT_PROVIDER in _AWS_AGENT_PROVIDERS or _use_mantle_provider():
+    aws_region = (
+        os.environ.get('AWS_REGION')
+        or os.environ.get('AWS_S3_REGION')
+        or 'us-east-1'
+    )
+    use_mantle = _use_mantle_provider()
+    effective_provider = 'mantle' if use_mantle else AGENT_PROVIDER
+
+    if not use_mantle and AGENT_PROVIDER == 'bedrock' and _ANTHROPIC_AWS_WORKSPACE_ID:
+        effective_provider = 'anthropic_aws'
+
+    if effective_provider == 'mantle':
+        AGENT_SDK_ENV = {
+            'CLAUDE_CODE_USE_MANTLE': '1',
+            'AWS_REGION': aws_region,
+        }
+        if _ANTHROPIC_AWS_WORKSPACE_ID:
+            AGENT_SDK_ENV['ANTHROPIC_AWS_WORKSPACE_ID'] = _ANTHROPIC_AWS_WORKSPACE_ID
+        if _MANTLE_BASE_URL:
+            AGENT_SDK_ENV['ANTHROPIC_BEDROCK_MANTLE_BASE_URL'] = _MANTLE_BASE_URL
+        if _BEDROCK_API_KEY.startswith('bedrock-api-key-'):
+            AGENT_SDK_ENV['ANTHROPIC_API_KEY'] = _BEDROCK_API_KEY
+        mantle_models = {
+            'ANTHROPIC_DEFAULT_SONNET_MODEL': 'anthropic.claude-sonnet-5',
+            'ANTHROPIC_DEFAULT_HAIKU_MODEL': 'anthropic.claude-haiku-4-5',
+            'ANTHROPIC_DEFAULT_OPUS_MODEL': 'anthropic.claude-opus-4-8',
+        }
+        for key, default in mantle_models.items():
+            value = os.environ.get(key, '').strip() or default
+            AGENT_SDK_ENV[key] = value
+    elif effective_provider == 'anthropic_aws':
+        if not _ANTHROPIC_AWS_WORKSPACE_ID:
+            raise ValueError(
+                'ANTHROPIC_AWS_WORKSPACE_ID is required when AGENT_PROVIDER=anthropic_aws'
+            )
+        AGENT_SDK_ENV = {
+            'CLAUDE_CODE_USE_ANTHROPIC_AWS': '1',
+            'ANTHROPIC_AWS_WORKSPACE_ID': _ANTHROPIC_AWS_WORKSPACE_ID,
+            'AWS_REGION': aws_region,
+        }
+        api_key = os.environ.get('ANTHROPIC_AWS_API_KEY', '').strip()
+        if api_key:
+            AGENT_SDK_ENV['ANTHROPIC_AWS_API_KEY'] = api_key
+    else:
+        AGENT_SDK_ENV = {
+            'CLAUDE_CODE_USE_BEDROCK': '1',
+            'AWS_REGION': aws_region,
+        }
+
+    if effective_provider != 'mantle':
+        for key in (
+            'ANTHROPIC_DEFAULT_SONNET_MODEL',
+            'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+            'ANTHROPIC_DEFAULT_OPUS_MODEL',
+        ):
+            value = os.environ.get(key, '').strip()
+            if value:
+                AGENT_SDK_ENV[key] = value
+
+    for key in (
+        'AWS_ACCESS_KEY_ID',
+        'AWS_SECRET_ACCESS_KEY',
+        'AWS_SESSION_TOKEN',
+        'AWS_PROFILE',
+    ):
+        value = os.environ.get(key, '').strip()
+        if value:
+            AGENT_SDK_ENV[key] = value
+
+# Resolved provider after auto-detection (useful for logging).
+AGENT_EFFECTIVE_PROVIDER = (
+    'mantle'
+    if _use_mantle_provider()
+    else (
+        'anthropic_aws'
+        if AGENT_PROVIDER == 'bedrock' and _ANTHROPIC_AWS_WORKSPACE_ID
+        else AGENT_PROVIDER
+    )
+)
+
+# Backwards-compatible alias used by agent service.
+AGENT_BEDROCK_ENV = AGENT_SDK_ENV
