@@ -15,6 +15,11 @@ urlpatterns = [
         name="workspace-lesson-detail",
     ),
     path(
+        "workspaces/<uuid:workspace_id>/materials/",
+        views.list_materials,
+        name="workspace-materials",
+    ),
+    path(
         "workspaces/<uuid:workspace_id>/messages/",
         views.list_messages,
         name="workspace-messages",

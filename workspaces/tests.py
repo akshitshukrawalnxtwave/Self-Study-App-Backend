@@ -183,7 +183,11 @@ class WorkspaceAPITests(IsolatedStorageTestCase):
         self.assertEqual(len(lesson_list), 1)
         self.assertIn("id", lesson_list[0])
         self.assertIn("title", lesson_list[0])
-        self.assertNotIn("url", lesson_list[0])
+        self.assertIn("path", lesson_list[0])
+        self.assertIn("url", lesson_list[0])
+        self.assertTrue(
+            lesson_list[0]["url"].endswith("lessons/0001-getting-started.html")
+        )
         self.assertEqual(Lesson.objects.filter(workspace_id=ws_id).count(), 1)
 
         lesson_id = lesson_list[0]["id"]
@@ -291,9 +295,7 @@ class S3WorkspaceStorageTests(IsolatedStorageTestCase):
         self.assertTrue(self.storage.exists(self.ws_id, "lessons/0001.html"))
         self.assertFalse(self.storage.exists(self.ws_id, "missing.html"))
         html = self.storage.read(self.ws_id, "lessons/0001.html")
-        self.assertIn("<html>hi</html>", html)
-        self.assertIn("lesson.css", html)
-        self.assertIn("quiz.js", html)
+        self.assertEqual(html, "<html>hi</html>")
         self.assertEqual(
             self.storage.list(self.ws_id, "lessons"),
             ["lessons/0001.html"],
@@ -302,44 +304,29 @@ class S3WorkspaceStorageTests(IsolatedStorageTestCase):
         self.assertIn("lessons/0001.html", snap)
         self.assertIn("MISSION.md", snap)
 
-    def test_file_url_returns_presigned_s3_url_for_html(self):
+    def test_file_url_returns_proxy_path_for_html(self):
         self.storage.write(self.ws_id, "lessons/0001.html", "<html>hi</html>")
         url = self.storage.file_url(self.ws_id, "lessons/0001.html")
-        self.assertTrue(url.startswith("https://"))
-        self.assertIn("test-self-study-bucket", url)
-        self.assertTrue("Signature=" in url or "X-Amz-Signature=" in url)
+        self.assertEqual(url, f"/workspaces/{self.ws_id}/lessons/0001.html")
 
-    def test_file_url_returns_presigned_s3_url_for_assets(self):
+    def test_file_url_returns_proxy_path_for_assets(self):
         url = self.storage.file_url(self.ws_id, "assets/lesson.css")
-        self.assertTrue(url.startswith("https://"))
-        self.assertIn("test-self-study-bucket", url)
-        self.assertTrue("Signature=" in url or "X-Amz-Signature=" in url)
+        self.assertEqual(url, f"/workspaces/{self.ws_id}/assets/lesson.css")
 
-    def test_html_upload_rewrites_asset_links_to_presigned_s3(self):
-        self.storage.write(
-            self.ws_id,
-            "lessons/0001.html",
-            (
-                '<link rel="stylesheet" href="../assets/lesson.css">'
-                '<script src="../assets/quiz.js"></script>'
-            ),
+    def test_html_upload_preserves_relative_asset_links(self):
+        original = (
+            '<link rel="stylesheet" href="../assets/lesson.css">'
+            '<script src="../assets/quiz.js"></script>'
         )
+        self.storage.write(self.ws_id, "lessons/0001.html", original)
         html = self.storage.read(self.ws_id, "lessons/0001.html")
-        self.assertIn("lesson.css", html)
-        self.assertIn("quiz.js", html)
-        self.assertNotIn("../assets/", html)
-        self.assertTrue("Signature=" in html or "X-Amz-Signature=" in html)
+        self.assertEqual(html, original)
 
-    def test_html_upload_injects_missing_quiz_script(self):
-        self.storage.write(
-            self.ws_id,
-            "lessons/0001.html",
-            "<html><head></head><body><p>Hi</p></body></html>",
-        )
+    def test_html_upload_does_not_inject_assets(self):
+        original = "<html><head></head><body><p>Hi</p></body></html>"
+        self.storage.write(self.ws_id, "lessons/0001.html", original)
         html = self.storage.read(self.ws_id, "lessons/0001.html")
-        self.assertIn("lesson.css", html)
-        self.assertIn("quiz.js", html)
-        self.assertTrue("Signature=" in html or "X-Amz-Signature=" in html)
+        self.assertEqual(html, original)
 
     def test_css_upload_sets_text_css_content_type(self):
         self.storage.write_bytes(
@@ -361,7 +348,7 @@ class S3WorkspaceStorageTests(IsolatedStorageTestCase):
         head = self.client_s3.head_object(Bucket="test-self-study-bucket", Key=key)
         self.assertEqual(head["ContentType"], "application/javascript; charset=utf-8")
 
-    def test_get_lesson_returns_presigned_s3_html_url(self):
+    def test_get_lesson_returns_proxy_html_url(self):
         reset_storage()
         http = Client()
         create = http.post(
@@ -385,9 +372,7 @@ class S3WorkspaceStorageTests(IsolatedStorageTestCase):
         detail = http.get(f"/api/workspaces/{ws_id}/lessons/{lesson.id}/")
         self.assertEqual(detail.status_code, 200)
         html_url = detail.json()["html_url"]
-        self.assertTrue(html_url.startswith("https://"))
-        self.assertIn("test-self-study-bucket", html_url)
-        self.assertTrue("Signature=" in html_url or "X-Amz-Signature=" in html_url)
+        self.assertEqual(html_url, f"/workspaces/{ws_id}/lessons/0001-demo.html")
 
     def test_api_create_and_serve_via_s3(self):
         reset_storage()
@@ -406,7 +391,33 @@ class S3WorkspaceStorageTests(IsolatedStorageTestCase):
 
         served = http.get(f"/workspaces/{ws_id}/assets/lesson.css")
         self.assertEqual(served.status_code, 200)
-        self.assertIn("text/css", served["Content-Type"])
+        self.assertEqual(served["Content-Type"], "text/css; charset=utf-8")
+        self.assertIn("Cache-Control", served)
+
+    def test_serve_reference_html_via_s3(self):
+        reset_storage()
+        http = Client()
+        ws_id = str(uuid.uuid4())
+        self.storage.write(
+            ws_id,
+            "reference/series-and-dataframe.html",
+            "<html><body>reference</body></html>",
+        )
+        Workspace.objects.create(title="Ref", topic_slug=f"ref-{ws_id[:8]}", id=ws_id)
+
+        served = http.get(f"/workspaces/{ws_id}/reference/series-and-dataframe.html")
+        self.assertEqual(served.status_code, 200)
+        self.assertEqual(served["Content-Type"], "text/html; charset=utf-8")
+
+    def test_disallowed_path_prefix_returns_403(self):
+        reset_storage()
+        http = Client()
+        ws_id = str(uuid.uuid4())
+        self.storage.write(ws_id, "MISSION.md", "# Mission\n")
+        Workspace.objects.create(title="Mission", topic_slug=f"mission-{ws_id[:8]}", id=ws_id)
+
+        response = http.get(f"/workspaces/{ws_id}/MISSION.md")
+        self.assertEqual(response.status_code, 403)
 
 
 class CloudStorageTests(IsolatedStorageTestCase):

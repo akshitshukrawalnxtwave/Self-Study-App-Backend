@@ -5,7 +5,7 @@ from workspaces.utils import lesson_title_from_path
 
 
 def lesson_html_url(workspace_id: str, path: str) -> str:
-    """URL the frontend should load for a lesson's HTML (presigned on S3)."""
+    """Proxy URL the frontend should load for a lesson's HTML."""
     return workspace_file_url(workspace_id, path)
 
 

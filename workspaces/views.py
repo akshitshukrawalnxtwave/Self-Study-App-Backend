@@ -1,5 +1,4 @@
 import logging
-import mimetypes
 import uuid
 
 from django.http import Http404, HttpResponse, JsonResponse
@@ -7,16 +6,23 @@ from django.views.decorators.clickjacking import xframe_options_exempt
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods
 
+from workspaces.auth import require_workspace_access
 from workspaces.models import ChatSession, Lesson, Message, Workspace
 from workspaces.services.agent import AgentError, AgentTimeoutError, agent_service
 from workspaces.services.lessons import (
     register_lessons_from_artifacts,
     sync_lessons_from_storage,
 )
+from workspaces.services.materials import (
+    list_materials_for_workspace,
+    register_materials_from_artifacts,
+)
 from workspaces.services.seeding import ensure_workspace_asset, seed_workspace_assets
 from workspaces.services.workspace_files import (
     apply_workspace_file_headers,
+    content_type_for_file_path,
     rewrite_workspace_asset_refs,
+    validate_workspace_file_path,
 )
 from workspaces.storage import get_storage, prune_orphan_workspace_dirs
 from workspaces.utils import (
@@ -34,6 +40,11 @@ def _get_workspace_or_404(workspace_id: str) -> Workspace:
         return Workspace.objects.get(pk=workspace_id)
     except (Workspace.DoesNotExist, ValueError):
         raise Http404
+
+
+def _authorize_workspace(request, workspace: Workspace):
+    """Return an error response when the caller cannot access the workspace."""
+    return require_workspace_access(request, workspace)
 
 
 def _get_active_session(workspace: Workspace) -> ChatSession:
@@ -85,15 +96,28 @@ def workspaces_collection(request):
 def list_lessons(request, workspace_id):
     """GET /api/workspaces/{id}/lessons/ — list lessons (synced from storage)."""
     workspace = _get_workspace_or_404(workspace_id)
+    if denied := _authorize_workspace(request, workspace):
+        return denied
     sync_lessons_from_storage(workspace)
     lessons = workspace.lessons.all()
     return JsonResponse([lesson.to_list_dict() for lesson in lessons], safe=False)
 
 
 @require_GET
-def get_lesson(request, workspace_id, lesson_id):
-    """GET lesson detail — returns { html_url } with fresh presigned links on S3."""
+def list_materials(request, workspace_id):
+    """GET /api/workspaces/{id}/materials/ — list learning materials (synced from storage)."""
     workspace = _get_workspace_or_404(workspace_id)
+    if denied := _authorize_workspace(request, workspace):
+        return denied
+    return JsonResponse(list_materials_for_workspace(workspace), safe=False)
+
+
+@require_GET
+def get_lesson(request, workspace_id, lesson_id):
+    """GET lesson detail — returns { html_url } as a proxy path."""
+    workspace = _get_workspace_or_404(workspace_id)
+    if denied := _authorize_workspace(request, workspace):
+        return denied
     try:
         lesson = workspace.lessons.get(pk=lesson_id)
     except (Lesson.DoesNotExist, ValueError):
@@ -103,11 +127,6 @@ def get_lesson(request, workspace_id, lesson_id):
     if not storage.exists(str(workspace.id), lesson.path):
         raise Http404
 
-    from workspaces.storage.s3 import S3WorkspaceStorage
-
-    if isinstance(storage, S3WorkspaceStorage):
-        storage.refresh_lesson_html_urls(str(workspace.id), lesson.path)
-
     return JsonResponse({"html_url": lesson.html_url})
 
 
@@ -115,6 +134,8 @@ def get_lesson(request, workspace_id, lesson_id):
 def list_messages(request, workspace_id):
     """GET /api/workspaces/{id}/messages/ — chat history for the active session."""
     workspace = _get_workspace_or_404(workspace_id)
+    if denied := _authorize_workspace(request, workspace):
+        return denied
     session = workspace.sessions.filter(is_active=True).first()
     if not session:
         return JsonResponse([], safe=False)
@@ -128,6 +149,8 @@ def list_messages(request, workspace_id):
 def chat(request, workspace_id):
     """POST a user message, run an agent turn, and return the turn result."""
     workspace = _get_workspace_or_404(workspace_id)
+    if denied := _authorize_workspace(request, workspace):
+        return denied
 
     body = parse_json_body(request)
     if not body:
@@ -170,6 +193,7 @@ def chat(request, workspace_id):
         workspace.save(update_fields=["last_panel_html_url"])
 
     register_lessons_from_artifacts(workspace, result.artifacts)
+    register_materials_from_artifacts(workspace, result.artifacts)
 
     return JsonResponse(turn_to_dict(turn_id, result))
 
@@ -177,38 +201,36 @@ def chat(request, workspace_id):
 @xframe_options_exempt
 @require_GET
 def serve_workspace_file(request, workspace_id, file_path):
-    """Serve a workspace file from storage (Django proxy for local/cloud modes)."""
-    _get_workspace_or_404(workspace_id)
+    """Serve a workspace file from storage via the stateless file proxy."""
+    workspace = _get_workspace_or_404(workspace_id)
+    if denied := _authorize_workspace(request, workspace):
+        return denied
 
-    if ".." in file_path.split("/"):
+    normalized_path = validate_workspace_file_path(file_path)
+    if normalized_path is None:
         return error_response("Path traversal not allowed", "FORBIDDEN", 403)
 
     storage = get_storage()
     try:
-        if not storage.exists(workspace_id, file_path):
-            ensure_workspace_asset(workspace_id, file_path)
-        if not storage.exists(workspace_id, file_path):
+        if not storage.exists(workspace_id, normalized_path):
+            ensure_workspace_asset(workspace_id, normalized_path)
+        if not storage.exists(workspace_id, normalized_path):
             raise Http404
-        data = storage.read_bytes(workspace_id, file_path)
+        data = storage.read_bytes(workspace_id, normalized_path)
     except ValueError:
         return error_response("Path traversal not allowed", "FORBIDDEN", 403)
     except FileNotFoundError:
         raise Http404
 
-    is_html = file_path.endswith(".html")
+    is_html = normalized_path.endswith(".html")
     if is_html:
         html = data.decode("utf-8")
         data = rewrite_workspace_asset_refs(html, workspace_id).encode("utf-8")
 
-    content_type, _ = mimetypes.guess_type(file_path)
-    if content_type is None:
-        content_type = "application/octet-stream"
-    if content_type.startswith("text/") or content_type in (
-        "application/javascript",
-        "application/json",
-    ):
-        content_type = f"{content_type}; charset=utf-8"
-
-    response = HttpResponse(data, content_type=content_type)
-    apply_workspace_file_headers(response, request, is_html=is_html)
+    response = HttpResponse(
+        data, content_type=content_type_for_file_path(normalized_path)
+    )
+    apply_workspace_file_headers(
+        response, request, is_html=is_html, file_path=normalized_path
+    )
     return response

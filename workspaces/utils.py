@@ -23,8 +23,18 @@ def lesson_title_from_path(path: str) -> str:
     """Derive a display title from a lesson file path (e.g. '0001-intro.html' -> 'Intro')."""
     name = path.rsplit("/", 1)[-1]
     name = re.sub(r"^\d+-", "", name)
-    name = re.sub(r"\.html$", "", name)
-    return name.replace("-", " ").title()
+    name = re.sub(r"\.html$", "", name, flags=re.IGNORECASE)
+    return name.replace("-", " ").replace("_", " ").title()
+
+
+def material_title_from_path(path: str) -> str:
+    """Derive a display title from a learning material path."""
+    filename = path.rsplit("/", 1)[-1]
+    if filename in ("RESOURCES.md", "NOTES.md"):
+        return filename.removesuffix(".md").title()
+    stem = re.sub(r"^\d+-", "", filename)
+    stem = re.sub(r"\.(html|md)$", "", stem, flags=re.IGNORECASE)
+    return stem.replace("-", " ").replace("_", " ").title()
 
 
 def turn_to_dict(turn_id, result) -> dict:

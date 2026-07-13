@@ -151,7 +151,10 @@ AGENT_TIMEOUT_SECONDS = int(os.environ.get('AGENT_TIMEOUT_SECONDS', '300'))
 AGENT_PERMISSION_MODE = os.environ.get('AGENT_PERMISSION_MODE', 'bypassPermissions')
 AGENT_MAX_TURNS = int(os.environ.get('AGENT_MAX_TURNS', '25'))
 
-# Optional absolute prefix for workspace URLs (leave empty for Vite /workspaces proxy).
+WORKSPACE_AUTH_REQUIRED = os.environ.get(
+    'WORKSPACE_AUTH_REQUIRED', 'false'
+).lower() == 'true'
+JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY', SECRET_KEY)
 WORKSPACES_PUBLIC_BASE_URL = os.environ.get(
     'WORKSPACES_PUBLIC_BASE_URL', ''
 ).rstrip('/')

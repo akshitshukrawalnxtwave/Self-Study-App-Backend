@@ -1,7 +1,11 @@
 from django.test import Client, TestCase, override_settings
 
 from workspaces.models import Workspace
-from workspaces.services.workspace_files import rewrite_workspace_asset_refs
+from workspaces.services.workspace_files import (
+    content_type_for_file_path,
+    rewrite_workspace_asset_refs,
+    validate_workspace_file_path,
+)
 from workspaces.storage import get_storage, reset_storage
 from workspaces.tests import IsolatedStorageTestCase
 
@@ -34,6 +38,62 @@ class RewriteAssetRefsTests(TestCase):
         out = rewrite_workspace_asset_refs(html, "ws-1")
         self.assertIn('href="/workspaces/ws-1/assets/lesson.css"', out)
         self.assertIn('src="/workspaces/ws-1/assets/quiz.js"', out)
+
+    def test_rewrites_presigned_s3_asset_urls_to_proxy_paths(self):
+        html = (
+            '<link rel="stylesheet" '
+            'href="https://bucket.s3.amazonaws.com/workspaces/ws-1/assets/lesson.css?X-Amz-Signature=abc">'
+        )
+        out = rewrite_workspace_asset_refs(html, "ws-1")
+        self.assertIn('href="/workspaces/ws-1/assets/lesson.css"', out)
+        self.assertNotIn("Signature=", out)
+
+
+class ValidateWorkspaceFilePathTests(TestCase):
+    def test_accepts_allowed_prefixes(self):
+        self.assertEqual(
+            validate_workspace_file_path("lessons/0001.html"),
+            "lessons/0001.html",
+        )
+        self.assertEqual(
+            validate_workspace_file_path("reference/foo.html"),
+            "reference/foo.html",
+        )
+        self.assertEqual(
+            validate_workspace_file_path("assets/lesson.css"),
+            "assets/lesson.css",
+        )
+
+    def test_rejects_path_traversal(self):
+        self.assertIsNone(validate_workspace_file_path("../etc/passwd"))
+        self.assertIsNone(validate_workspace_file_path("lessons/../../secret.txt"))
+
+    def test_rejects_disallowed_prefix(self):
+        self.assertIsNone(validate_workspace_file_path("MISSION.md"))
+
+    def test_accepts_root_resource_markdown(self):
+        self.assertEqual(validate_workspace_file_path("RESOURCES.md"), "RESOURCES.md")
+        self.assertEqual(validate_workspace_file_path("NOTES.md"), "NOTES.md")
+
+
+class ContentTypeMappingTests(TestCase):
+    def test_maps_common_extensions(self):
+        self.assertEqual(
+            content_type_for_file_path("lessons/foo.html"),
+            "text/html; charset=utf-8",
+        )
+        self.assertEqual(
+            content_type_for_file_path("assets/lesson.css"),
+            "text/css; charset=utf-8",
+        )
+        self.assertEqual(
+            content_type_for_file_path("assets/quiz.js"),
+            "application/javascript; charset=utf-8",
+        )
+        self.assertEqual(
+            content_type_for_file_path("learning-records/foo.md"),
+            "text/plain; charset=utf-8",
+        )
 
 
 class ServeWorkspaceHtmlTests(IsolatedStorageTestCase):

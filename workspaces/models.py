@@ -86,15 +86,62 @@ class Lesson(models.Model):
 
     @property
     def html_url(self) -> str:
-        """Frontend-facing URL for this lesson's HTML (presigned on S3)."""
+        """Frontend-facing proxy URL for this lesson's HTML."""
         from workspaces.services.lessons import lesson_html_url
 
         return lesson_html_url(str(self.workspace_id), self.path)
 
     def to_list_dict(self) -> dict:
         """Compact serialization for the lesson list endpoint."""
-        return {"id": str(self.id), "title": self.title}
+        return {
+            "id": str(self.id),
+            "title": self.title,
+            "path": self.path,
+            "url": self.html_url,
+        }
 
     def to_detail_dict(self) -> dict:
         """Full serialization including the lesson HTML URL."""
         return {"id": str(self.id), "title": self.title, "html_url": self.html_url}
+
+
+class LearningMaterial(models.Model):
+    KIND_REFERENCE = "reference"
+    KIND_LEARNING_RECORD = "learning_record"
+    KIND_RESOURCE = "resource"
+
+    FORMAT_HTML = "html"
+    FORMAT_MARKDOWN = "markdown"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(
+        Workspace, on_delete=models.CASCADE, related_name="materials"
+    )
+    path = models.CharField(max_length=512)
+    kind = models.CharField(max_length=32)
+    format = models.CharField(max_length=16)
+    title = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["kind", "path"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "path"],
+                name="unique_material_path_per_workspace",
+            )
+        ]
+
+    def to_dict(self, workspace_id: str | None = None) -> dict:
+        """Serialize for the learning materials list API."""
+        from workspaces.storage.urls import workspace_file_url
+
+        ws_id = workspace_id or str(self.workspace_id)
+        return {
+            "kind": self.kind,
+            "path": self.path,
+            "url": workspace_file_url(ws_id, self.path),
+            "title": self.title,
+            "format": self.format,
+        }
