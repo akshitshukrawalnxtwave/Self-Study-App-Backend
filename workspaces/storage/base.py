@@ -1,6 +1,11 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
+import hashlib
 
 from django.conf import settings
+
+from workspaces.services.workspace_files import content_type_for_file_path
 
 
 class WorkspaceStorage(ABC):
@@ -49,3 +54,21 @@ class WorkspaceStorage(ABC):
         if base:
             return f"{base}{rel}"
         return rel
+
+    def file_info(self, workspace_id: str, path: str) -> dict:
+        """Return manifest metadata for one workspace file."""
+        content = self.read_bytes(workspace_id, path)
+        return {
+            "path": path,
+            "etag": hashlib.sha256(content).hexdigest(),
+            "size": len(content),
+            "content_type": content_type_for_file_path(path),
+        }
+
+    def manifest_files(self, workspace_id: str) -> list[dict]:
+        """Return metadata for every file in the workspace."""
+        return [self.file_info(workspace_id, path) for path in self.list(workspace_id, "")]
+
+    def presign_get_url(self, workspace_id: str, path: str, expires_in: int) -> str:
+        """Return a short-lived GET URL. Non-S3 backends use the proxy URL."""
+        return self.file_url(workspace_id, path)

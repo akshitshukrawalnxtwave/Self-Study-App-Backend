@@ -1,10 +1,11 @@
 import json
 import shutil
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
-from django.test import Client, TestCase, override_settings
+from django.test import Client, TestCase, TransactionTestCase, override_settings
 from moto import mock_aws
 
 from workspaces.models import ChatSession, Lesson, Workspace
@@ -21,10 +22,26 @@ from workspaces.storage.cloud import CloudWorkspaceStorage
 from workspaces.storage.s3 import S3WorkspaceStorage
 
 
-class IsolatedStorageTestCase(TestCase):
+def _poll_turn(client, workspace_id, turn_id, timeout=10.0):
+    """Poll GET chat turn until completed/failed or timeout."""
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        last = client.get(f"/api/workspaces/{workspace_id}/chat/{turn_id}/")
+        if last.status_code != 200:
+            return last
+        status = last.json().get("status")
+        if status in ("completed", "failed"):
+            return last
+        time.sleep(0.05)
+    return last
+
+
+class _IsolatedStorageMixin:
     """Use temporary workspace dirs so tests never write to project workspaces_data/."""
 
     def setUp(self):
+        super().setUp()
         self._tmp = tempfile.mkdtemp()
         self.workspaces_root = Path(self._tmp) / "workspaces_data"
         self.cloud_root = Path(self._tmp) / "workspaces_cloud"
@@ -40,15 +57,18 @@ class IsolatedStorageTestCase(TestCase):
         self._settings.disable()
         reset_storage()
         shutil.rmtree(self._tmp, ignore_errors=True)
+        super().tearDown()
+
+
+class IsolatedStorageTestCase(_IsolatedStorageMixin, TestCase):
+    """Isolated storage with TestCase transaction rollback."""
+
+
+class IsolatedStorageTransactionTestCase(_IsolatedStorageMixin, TransactionTestCase):
+    """Isolated storage with real commits (needed for background chat turns)."""
 
 
 class WorkspaceAPITests(IsolatedStorageTestCase):
-    def setUp(self):
-        super().setUp()
-
-    def tearDown(self):
-        super().tearDown()
-
     def test_list_workspaces_empty(self):
         response = self.client.get("/api/workspaces/")
         self.assertEqual(response.status_code, 200)
@@ -118,85 +138,9 @@ class WorkspaceAPITests(IsolatedStorageTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), [])
 
-    def test_list_messages_returns_chat_history(self):
-        create = self.client.post(
-            "/api/workspaces/",
-            data=json.dumps({"title": "History", "topic_slug": "history"}),
-            content_type="application/json",
-        )
-        ws_id = create.json()["id"]
-
-        self.client.post(
-            f"/api/workspaces/{ws_id}/chat/",
-            data=json.dumps({"content": "Hello"}),
-            content_type="application/json",
-        )
-
-        response = self.client.get(f"/api/workspaces/{ws_id}/messages/")
-        self.assertEqual(response.status_code, 200)
-        messages = response.json()
-        self.assertEqual(len(messages), 2)
-        self.assertEqual(messages[0]["role"], "user")
-        self.assertEqual(messages[0]["content"], "Hello")
-        self.assertEqual(messages[1]["role"], "assistant")
-        self.assertIn("id", messages[0])
-        self.assertIn("created_at", messages[0])
-
     def test_list_messages_not_found(self):
         response = self.client.get(f"/api/workspaces/{uuid.uuid4()}/messages/")
         self.assertEqual(response.status_code, 404)
-
-    def test_chat_turn_fixture_mode(self):
-        create = self.client.post(
-            "/api/workspaces/",
-            data=json.dumps({"title": "Physics", "topic_slug": "physics"}),
-            content_type="application/json",
-        )
-        ws_id = create.json()["id"]
-
-        first = self.client.post(
-            f"/api/workspaces/{ws_id}/chat/",
-            data=json.dumps({"content": "I want to learn physics"}),
-            content_type="application/json",
-        )
-        self.assertEqual(first.status_code, 200)
-        first_data = first.json()
-        self.assertIsNone(first_data["panel"]["html_url"])
-        self.assertEqual(len(first_data["messages"]), 1)
-
-        second = self.client.post(
-            f"/api/workspaces/{ws_id}/chat/",
-            data=json.dumps({"content": "For my exams"}),
-            content_type="application/json",
-        )
-        self.assertEqual(second.status_code, 200)
-        second_data = second.json()
-        self.assertIsNotNone(second_data["panel"]["html_url"])
-        self.assertTrue(
-            second_data["panel"]["html_url"].endswith("lessons/0001-getting-started.html")
-        )
-        self.assertTrue(any(a["type"] == "lesson" for a in second_data["artifacts"]))
-
-        lessons = self.client.get(f"/api/workspaces/{ws_id}/lessons/")
-        self.assertEqual(lessons.status_code, 200)
-        lesson_list = lessons.json()
-        self.assertEqual(len(lesson_list), 1)
-        self.assertIn("id", lesson_list[0])
-        self.assertIn("title", lesson_list[0])
-        self.assertIn("path", lesson_list[0])
-        self.assertIn("url", lesson_list[0])
-        self.assertTrue(
-            lesson_list[0]["url"].endswith("lessons/0001-getting-started.html")
-        )
-        self.assertEqual(Lesson.objects.filter(workspace_id=ws_id).count(), 1)
-
-        lesson_id = lesson_list[0]["id"]
-        detail = self.client.get(f"/api/workspaces/{ws_id}/lessons/{lesson_id}/")
-        self.assertEqual(detail.status_code, 200)
-        self.assertIn("html_url", detail.json())
-        self.assertTrue(
-            detail.json()["html_url"].endswith("lessons/0001-getting-started.html")
-        )
 
     def test_get_lesson_not_found(self):
         create = self.client.post(
@@ -230,6 +174,164 @@ class WorkspaceAPITests(IsolatedStorageTestCase):
         ws_id = create.json()["id"]
         response = self.client.get(f"/workspaces/{ws_id}/../secret.txt")
         self.assertIn(response.status_code, (403, 404))
+
+    def test_workspace_manifest_includes_all_storage_files_and_version_changes(self):
+        ws = Workspace.objects.create(title="Manifest", topic_slug="manifest")
+        ws_id = str(ws.id)
+        storage = get_storage()
+        storage.write(ws_id, "lessons/0001-intro.html", "<html>old</html>")
+        storage.write(ws_id, "assets/lesson.css", "body {}")
+        storage.write_bytes(ws_id, "images/diagram.png", b"png-bytes")
+
+        first = self.client.get(f"/api/workspaces/{ws_id}/manifest/")
+        self.assertEqual(first.status_code, 200)
+        first_data = first.json()
+        by_path = {item["path"]: item for item in first_data["files"]}
+        self.assertIn("lessons/0001-intro.html", by_path)
+        self.assertIn("assets/lesson.css", by_path)
+        self.assertIn("images/diagram.png", by_path)
+        self.assertEqual(
+            by_path["lessons/0001-intro.html"]["content_type"],
+            "text/html; charset=utf-8",
+        )
+
+        storage.write(ws_id, "lessons/0001-intro.html", "<html>new</html>")
+        second = self.client.get(f"/api/workspaces/{ws_id}/manifest/")
+        self.assertNotEqual(
+            first_data["workspace_version"],
+            second.json()["workspace_version"],
+        )
+
+    def test_presign_rejects_invalid_paths(self):
+        ws = Workspace.objects.create(title="Presign", topic_slug="presign-invalid")
+        response = self.client.post(
+            f"/api/workspaces/{ws.id}/files/presign/",
+            data=json.dumps({"paths": ["../secret.txt", "/assets/lesson.css"]}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["code"], "VALIDATION_ERROR")
+
+    def test_presign_returns_404_for_missing_paths(self):
+        ws = Workspace.objects.create(title="Presign", topic_slug="presign-missing")
+        response = self.client.post(
+            f"/api/workspaces/{ws.id}/files/presign/",
+            data=json.dumps({"paths": ["lessons/missing.html"]}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["missing_paths"], ["lessons/missing.html"])
+
+    def test_presign_returns_urls_for_existing_paths_only_when_requested(self):
+        ws = Workspace.objects.create(title="Presign", topic_slug="presign-success")
+        ws_id = str(ws.id)
+        storage = get_storage()
+        storage.write(ws_id, "lessons/0001.html", "<html></html>")
+        storage.write(ws_id, "assets/lesson.css", "body {}")
+
+        response = self.client.post(
+            f"/api/workspaces/{ws_id}/files/presign/",
+            data=json.dumps({"paths": ["assets/lesson.css"]}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        urls = response.json()["urls"]
+        self.assertEqual(len(urls), 1)
+        self.assertEqual(urls[0]["path"], "assets/lesson.css")
+        self.assertEqual(urls[0]["url"], f"/workspaces/{ws_id}/assets/lesson.css")
+        self.assertEqual(urls[0]["expires_in"], 3600)
+
+
+class WorkspaceChatPollingTests(IsolatedStorageTransactionTestCase):
+    """Chat POST/GET polling (background thread needs committed rows)."""
+
+    def test_list_messages_returns_chat_history(self):
+        create = self.client.post(
+            "/api/workspaces/",
+            data=json.dumps({"title": "History", "topic_slug": "history"}),
+            content_type="application/json",
+        )
+        ws_id = create.json()["id"]
+
+        started = self.client.post(
+            f"/api/workspaces/{ws_id}/chat/",
+            data=json.dumps({"content": "Hello"}),
+            content_type="application/json",
+        )
+        self.assertEqual(started.status_code, 202)
+        self.assertEqual(started.json()["status"], "pending")
+        turned = _poll_turn(self.client, ws_id, started.json()["turn_id"])
+        self.assertEqual(turned.status_code, 200)
+        self.assertEqual(turned.json()["status"], "completed")
+
+        response = self.client.get(f"/api/workspaces/{ws_id}/messages/")
+        self.assertEqual(response.status_code, 200)
+        messages = response.json()
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(messages[0]["role"], "user")
+        self.assertEqual(messages[0]["content"], "Hello")
+        self.assertEqual(messages[1]["role"], "assistant")
+        self.assertIn("id", messages[0])
+        self.assertIn("created_at", messages[0])
+
+    def test_chat_turn_fixture_mode(self):
+        create = self.client.post(
+            "/api/workspaces/",
+            data=json.dumps({"title": "Physics", "topic_slug": "physics"}),
+            content_type="application/json",
+        )
+        ws_id = create.json()["id"]
+
+        first = self.client.post(
+            f"/api/workspaces/{ws_id}/chat/",
+            data=json.dumps({"content": "I want to learn physics"}),
+            content_type="application/json",
+        )
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(first.json()["status"], "pending")
+        first_poll = _poll_turn(self.client, ws_id, first.json()["turn_id"])
+        self.assertEqual(first_poll.status_code, 200)
+        first_data = first_poll.json()
+        self.assertEqual(first_data["status"], "completed")
+        self.assertIsNone(first_data["panel"]["html_url"])
+        self.assertEqual(len(first_data["messages"]), 1)
+
+        second = self.client.post(
+            f"/api/workspaces/{ws_id}/chat/",
+            data=json.dumps({"content": "For my exams"}),
+            content_type="application/json",
+        )
+        self.assertEqual(second.status_code, 202)
+        second_poll = _poll_turn(self.client, ws_id, second.json()["turn_id"])
+        self.assertEqual(second_poll.status_code, 200)
+        second_data = second_poll.json()
+        self.assertEqual(second_data["status"], "completed")
+        self.assertIsNotNone(second_data["panel"]["html_url"])
+        self.assertTrue(
+            second_data["panel"]["html_url"].endswith("lessons/0001-getting-started.html")
+        )
+        self.assertTrue(any(a["type"] == "lesson" for a in second_data["artifacts"]))
+
+        lessons = self.client.get(f"/api/workspaces/{ws_id}/lessons/")
+        self.assertEqual(lessons.status_code, 200)
+        lesson_list = lessons.json()
+        self.assertEqual(len(lesson_list), 1)
+        self.assertIn("id", lesson_list[0])
+        self.assertIn("title", lesson_list[0])
+        self.assertIn("path", lesson_list[0])
+        self.assertIn("url", lesson_list[0])
+        self.assertTrue(
+            lesson_list[0]["url"].endswith("lessons/0001-getting-started.html")
+        )
+        self.assertEqual(Lesson.objects.filter(workspace_id=ws_id).count(), 1)
+
+        lesson_id = lesson_list[0]["id"]
+        detail = self.client.get(f"/api/workspaces/{ws_id}/lessons/{lesson_id}/")
+        self.assertEqual(detail.status_code, 200)
+        self.assertIn("html_url", detail.json())
+        self.assertTrue(
+            detail.json()["html_url"].endswith("lessons/0001-getting-started.html")
+        )
 
 
 class AgentServiceTests(IsolatedStorageTestCase):
@@ -312,6 +414,31 @@ class S3WorkspaceStorageTests(IsolatedStorageTestCase):
     def test_file_url_returns_proxy_path_for_assets(self):
         url = self.storage.file_url(self.ws_id, "assets/lesson.css")
         self.assertEqual(url, f"/workspaces/{self.ws_id}/assets/lesson.css")
+
+    def test_manifest_file_info_uses_s3_metadata(self):
+        self.storage.write(self.ws_id, "assets/lesson.css", "body {}")
+        info = self.storage.file_info(self.ws_id, "assets/lesson.css")
+        self.assertEqual(info["path"], "assets/lesson.css")
+        self.assertEqual(info["size"], len("body {}"))
+        self.assertEqual(info["content_type"], "text/css; charset=utf-8")
+        self.assertTrue(info["etag"])
+
+    def test_identical_reupload_keeps_same_etag(self):
+        self.storage.write(self.ws_id, "assets/lesson.css", "body { color: red; }")
+        first = self.storage.file_info(self.ws_id, "assets/lesson.css")["etag"]
+        self.storage.write(self.ws_id, "assets/lesson.css", "body { color: red; }")
+        second = self.storage.file_info(self.ws_id, "assets/lesson.css")["etag"]
+        self.assertEqual(first, second)
+
+        self.storage.write(self.ws_id, "assets/lesson.css", "body { color: blue; }")
+        third = self.storage.file_info(self.ws_id, "assets/lesson.css")["etag"]
+        self.assertNotEqual(first, third)
+
+    def test_presign_get_url_targets_workspace_object(self):
+        self.storage.write(self.ws_id, "lessons/0001.html", "<html>hi</html>")
+        url = self.storage.presign_get_url(self.ws_id, "lessons/0001.html", 900)
+        self.assertIn("lessons/0001.html", url)
+        self.assertIn("Signature", url)
 
     def test_html_upload_preserves_relative_asset_links(self):
         original = (

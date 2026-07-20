@@ -11,10 +11,10 @@ PROTECTED_SEED_ASSET_PATHS = frozenset(f"assets/{name}" for name in SEED_ASSET_N
 def _sanitize_seed_content(name: str, content: str) -> str:
     """Strip accidental Python string wrappers the agent may have written."""
     stripped = content.strip()
-    if stripped.startswith('"""') and stripped.endswith('"'):
-        stripped = stripped[3:-1].strip()
-    elif stripped.startswith('"""') and stripped.endswith('"""'):
+    if stripped.startswith('"""') and stripped.endswith('"""'):
         stripped = stripped[3:-3].strip()
+    elif stripped.startswith('"""') and stripped.endswith('"'):
+        stripped = stripped[3:-1].strip()
     elif stripped.startswith('"') and stripped.endswith('"') and name.endswith(".css"):
         stripped = stripped[1:-1].strip()
     return stripped

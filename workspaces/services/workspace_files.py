@@ -15,10 +15,10 @@ ALLOWED_WORKSPACE_FILE_PREFIXES = (
 ALLOWED_ROOT_MARKDOWN_FILES = frozenset({"RESOURCES.md", "NOTES.md"})
 
 
-def validate_workspace_file_path(file_path: str) -> str | None:
+def validate_workspace_storage_path(file_path: str) -> str | None:
     """
-    Normalize and validate a workspace file path for the file proxy.
-    Returns None when the path is invalid or not under an allowed prefix.
+    Normalize a workspace-relative storage path.
+    Returns None for absolute paths, traversal, empty segments, or null bytes.
     """
     if not file_path or "\x00" in file_path:
         return None
@@ -33,6 +33,18 @@ def validate_workspace_file_path(file_path: str) -> str | None:
 
     parts = normalized.split("/")
     if ".." in parts or any(part == "" for part in parts):
+        return None
+
+    return normalized
+
+
+def validate_workspace_file_path(file_path: str) -> str | None:
+    """
+    Normalize and validate a workspace file path for the file proxy.
+    Returns None when the path is invalid or not under an allowed prefix.
+    """
+    normalized = validate_workspace_storage_path(file_path)
+    if normalized is None:
         return None
 
     if not any(normalized.startswith(prefix) for prefix in ALLOWED_WORKSPACE_FILE_PREFIXES):

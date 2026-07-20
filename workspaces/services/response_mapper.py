@@ -89,11 +89,11 @@ def latest_lesson_panel(
     ]
     if lesson_artifacts:
         path = lesson_artifacts[-1]["path"]
-        return workspace_file_url(workspace_id, path), path
+        return path, path
 
     previous_path = normalize_lesson_path(workspace_id, previous_stored_path)
     if previous_path:
-        return workspace_file_url(workspace_id, previous_path), previous_path
+        return previous_path, previous_path
     return None, None
 
 

@@ -65,6 +65,53 @@ class Message(models.Model):
         }
 
 
+class ChatTurn(models.Model):
+    STATUS_PENDING = "pending"
+    STATUS_RUNNING = "running"
+    STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
+
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_RUNNING, "Running"),
+        (STATUS_COMPLETED, "Completed"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(
+        Workspace, on_delete=models.CASCADE, related_name="turns"
+    )
+    session = models.ForeignKey(
+        ChatSession, on_delete=models.CASCADE, related_name="turns"
+    )
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING
+    )
+    user_content = models.TextField()
+    result = models.JSONField(null=True, blank=True)
+    error_message = models.TextField(blank=True, default="")
+    error_code = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def to_status_dict(self) -> dict:
+        """Serialize turn status for polling; includes result when completed."""
+        payload = {
+            "turn_id": str(self.id),
+            "status": self.status,
+        }
+        if self.status == self.STATUS_COMPLETED and self.result is not None:
+            payload.update(self.result)
+        elif self.status == self.STATUS_FAILED:
+            payload["error"] = self.error_message
+            payload["code"] = self.error_code or "INTERNAL_ERROR"
+        return payload
+
+
 class Lesson(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(

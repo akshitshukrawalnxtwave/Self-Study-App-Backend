@@ -166,6 +166,42 @@ class S3WorkspaceStorage(WorkspaceStorage):
                 return False
             raise
 
+    def file_info(self, workspace_id: str, path: str) -> dict:
+        """Return manifest metadata for a single S3 object."""
+        normalized = self._validate_path(path)
+        key = self._key(workspace_id, normalized)
+        try:
+            response = self._client.head_object(Bucket=self.bucket, Key=key)
+        except ClientError as exc:
+            if _is_not_found(exc):
+                raise FileNotFoundError(path) from exc
+            raise
+
+        # Prefer content ETag over VersionId. VersionId changes on every PUT
+        # (including identical re-uploads after agent sync), which would force
+        # the frontend to re-download unchanged files.
+        etag = response.get("ETag", "").strip('"') or response.get("VersionId", "")
+        return {
+            "path": normalized,
+            "etag": etag,
+            "size": response.get("ContentLength", 0),
+            "content_type": response.get("ContentType") or self._content_type(normalized),
+        }
+
+    def manifest_files(self, workspace_id: str) -> list[dict]:
+        """Return metadata for every S3 object in a workspace."""
+        return [self.file_info(workspace_id, path) for path in self.list(workspace_id, "")]
+
+    def presign_get_url(self, workspace_id: str, path: str, expires_in: int) -> str:
+        """Generate a short-lived S3 presigned GET URL for a workspace object."""
+        normalized = self._validate_path(path)
+        key = self._key(workspace_id, normalized)
+        return self._client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": self.bucket, "Key": key},
+            ExpiresIn=expires_in,
+        )
+
     def snapshot(self, workspace_id: str) -> dict[str, float]:
         """Return {relative_path: last_modified_timestamp} for all objects."""
         workspace_prefix = self._workspace_prefix(workspace_id)
