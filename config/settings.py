@@ -27,12 +27,28 @@ if "test" not in sys.argv:
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
+SECRET_KEY = os.environ.get('SECRET_KEY') or os.environ.get('DJANGO_SECRET_KEY') \
+    or 'django-insecure-dev-only-change-me'
 
-SECRET_KEY = os.environ.get('SECRET_KEY')
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get('DJANGO_DEBUG', 'true').lower() == 'true'
 
-ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
+ALLOWED_HOSTS = [
+    h.strip()
+    for h in os.environ.get(
+        'DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1'
+    ).split(',')
+    if h.strip()
+]
+
+# Behind nginx/ALB terminating TLS: trust the forwarded-proto header and the
+# HTTPS origins of any non-local hosts for CSRF checks.
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+CSRF_TRUSTED_ORIGINS = [
+    f'https://{h}'
+    for h in ALLOWED_HOSTS
+    if h not in ('localhost', '127.0.0.1')
+]
 
 
 # Application definition
@@ -44,11 +60,13 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'corsheaders',
     'workspaces',
 ]
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -123,6 +141,8 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+# Collected static files (Django admin, etc.) for gunicorn/nginx to serve in prod.
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 # Agent local working copy (LRU cache when using cloud/s3 backends).
 WORKSPACES_ROOT = BASE_DIR / 'workspaces_data'
