@@ -15,6 +15,21 @@ urlpatterns = [
         name="workspace-lesson-detail",
     ),
     path(
+        "workspaces/<uuid:workspace_id>/materials/",
+        views.list_materials,
+        name="workspace-materials",
+    ),
+    path(
+        "workspaces/<uuid:workspace_id>/manifest/",
+        views.workspace_manifest,
+        name="workspace-manifest",
+    ),
+    path(
+        "workspaces/<uuid:workspace_id>/files/presign/",
+        views.presign_workspace_files,
+        name="workspace-files-presign",
+    ),
+    path(
         "workspaces/<uuid:workspace_id>/messages/",
         views.list_messages,
         name="workspace-messages",
@@ -23,5 +38,10 @@ urlpatterns = [
         "workspaces/<uuid:workspace_id>/chat/",
         views.chat,
         name="workspace-chat",
+    ),
+    path(
+        "workspaces/<uuid:workspace_id>/chat/<uuid:turn_id>/",
+        views.get_chat_turn,
+        name="workspace-chat-turn",
     ),
 ]

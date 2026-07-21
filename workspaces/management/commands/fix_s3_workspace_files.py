@@ -10,8 +10,7 @@ from workspaces.storage.s3 import S3WorkspaceStorage
 
 class Command(BaseCommand):
     help = (
-        "Repair S3 workspace files: restore seed assets, fix Content-Type metadata, "
-        "and refresh presigned CSS/JS links inside lesson HTML."
+        "Repair S3 workspace files: restore seed assets and fix Content-Type metadata."
     )
 
     def add_arguments(self, parser):
@@ -27,7 +26,7 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        """Re-seed assets, fix Content-Type, and refresh lesson HTML links on S3."""
+        """Re-seed assets and fix Content-Type metadata on S3."""
         if not is_s3_backend():
             raise CommandError("Set STORAGE_BACKEND=s3 in .env before running this command.")
 
@@ -61,12 +60,7 @@ class Command(BaseCommand):
 
             seed_workspace_assets(ws_id)
             for path in paths:
-                if path.startswith("lessons/") and path.endswith(".html"):
-                    storage.refresh_lesson_html_urls(ws_id, path)
-                elif path.startswith("assets/"):
-                    continue
-                else:
-                    storage.fix_object_metadata(ws_id, path)
+                storage.fix_object_metadata(ws_id, path)
                 self.stdout.write(f"  repaired {path}")
                 total += 1
 

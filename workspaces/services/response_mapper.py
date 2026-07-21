@@ -20,11 +20,15 @@ def normalize_lesson_path(workspace_id: str, stored: str | None) -> str | None:
     if stored.startswith("lessons/") and stored.endswith(".html"):
         return stored
 
-    server_prefix = f"/workspaces/{workspace_id}/"
-    if stored.startswith(server_prefix):
-        path = stored[len(server_prefix) :]
-        if path.startswith("lessons/") and path.endswith(".html"):
-            return path
+    for server_prefix in (
+        f"/api/workspaces/{workspace_id}/",
+        f"/workspaces/{workspace_id}/",
+    ):
+        if stored.startswith(server_prefix):
+            path = stored[len(server_prefix) :]
+            if path.startswith("lessons/") and path.endswith(".html"):
+                return path
+            break
 
     from django.conf import settings
 
@@ -89,11 +93,11 @@ def latest_lesson_panel(
     ]
     if lesson_artifacts:
         path = lesson_artifacts[-1]["path"]
-        return workspace_file_url(workspace_id, path), path
+        return path, path
 
     previous_path = normalize_lesson_path(workspace_id, previous_stored_path)
     if previous_path:
-        return workspace_file_url(workspace_id, previous_path), previous_path
+        return previous_path, previous_path
     return None, None
 
 

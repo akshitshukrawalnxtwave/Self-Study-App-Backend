@@ -1,6 +1,11 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
+import hashlib
 
 from django.conf import settings
+
+from workspaces.services.workspace_files import content_type_for_file_path
 
 
 class WorkspaceStorage(ABC):
@@ -42,10 +47,28 @@ class WorkspaceStorage(ABC):
         ...
 
     def file_url(self, workspace_id: str, path: str) -> str:
-        """Public URL for a workspace file (presigned S3 URL for HTML when on S3)."""
+        """Public proxy URL for a workspace file."""
         normalized = path.strip("/")
-        rel = f"/workspaces/{workspace_id}/{normalized}"
+        rel = f"/api/workspaces/{workspace_id}/{normalized}"
         base = getattr(settings, "WORKSPACES_PUBLIC_BASE_URL", "").rstrip("/")
         if base:
             return f"{base}{rel}"
         return rel
+
+    def file_info(self, workspace_id: str, path: str) -> dict:
+        """Return manifest metadata for one workspace file."""
+        content = self.read_bytes(workspace_id, path)
+        return {
+            "path": path,
+            "etag": hashlib.sha256(content).hexdigest(),
+            "size": len(content),
+            "content_type": content_type_for_file_path(path),
+        }
+
+    def manifest_files(self, workspace_id: str) -> list[dict]:
+        """Return metadata for every file in the workspace."""
+        return [self.file_info(workspace_id, path) for path in self.list(workspace_id, "")]
+
+    def presign_get_url(self, workspace_id: str, path: str, expires_in: int) -> str:
+        """Return a short-lived GET URL. Non-S3 backends use the proxy URL."""
+        return self.file_url(workspace_id, path)
