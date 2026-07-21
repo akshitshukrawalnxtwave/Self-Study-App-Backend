@@ -10,7 +10,7 @@ from django.views.decorators.clickjacking import xframe_options_exempt
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods
 
-from workspaces.auth import require_workspace_access
+from workspaces.auth import require_authenticated_user, require_workspace_access
 from workspaces.models import ChatSession, ChatTurn, Lesson, Message, Workspace
 from workspaces.services.agent import AgentError, AgentTimeoutError, agent_service
 from workspaces.services.lessons import (
@@ -62,9 +62,15 @@ def _get_active_session(workspace: Workspace) -> ChatSession:
 
 @require_GET
 def list_workspaces(request):
-    """GET /api/workspaces/ — list all workspaces as JSON."""
+    """GET /api/workspaces/ — list workspaces for the current user."""
+    user_id, denied = require_authenticated_user(request)
+    if denied:
+        return denied
+
     prune_orphan_workspace_dirs()
     workspaces = Workspace.objects.all()
+    if user_id is not None:
+        workspaces = workspaces.filter(user_id=user_id)
     return JsonResponse([w.to_dict() for w in workspaces], safe=False)
 
 
@@ -74,6 +80,10 @@ def workspaces_collection(request):
     """GET lists workspaces; POST creates one (seeded with shared assets)."""
     if request.method == "GET":
         return list_workspaces(request)
+
+    user_id, denied = require_authenticated_user(request)
+    if denied:
+        return denied
 
     body = parse_json_body(request)
     if not body:
@@ -86,11 +96,15 @@ def workspaces_collection(request):
             "title and topic_slug are required", "VALIDATION_ERROR", 400
         )
 
-    existing = Workspace.objects.filter(topic_slug=topic_slug).first()
+    existing = Workspace.objects.filter(
+        topic_slug=topic_slug, user_id=user_id
+    ).first()
     if existing:
         return JsonResponse(existing.to_dict(), status=200)
 
-    workspace = Workspace.objects.create(title=title, topic_slug=topic_slug)
+    workspace = Workspace.objects.create(
+        title=title, topic_slug=topic_slug, user_id=user_id
+    )
     seed_workspace_assets(str(workspace.id))
     ChatSession.objects.create(workspace=workspace, is_active=True)
 

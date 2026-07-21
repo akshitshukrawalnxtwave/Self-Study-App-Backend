@@ -57,6 +57,19 @@ def _user_id_from_jwt(token: str) -> uuid.UUID | None:
         return None
 
 
+def require_authenticated_user(request: HttpRequest):
+    """
+    Resolve the caller's user id.
+
+    When WORKSPACE_AUTH_REQUIRED is on and identity is missing, return
+    (None, 401 response). Otherwise return (user_id | None, None).
+    """
+    user_id = get_request_user_id(request)
+    if getattr(settings, "WORKSPACE_AUTH_REQUIRED", False) and user_id is None:
+        return None, error_response("Not authenticated", "UNAUTHORIZED", 401)
+    return user_id, None
+
+
 def require_workspace_access(request: HttpRequest, workspace: Workspace):
     """
     Return an error JsonResponse when auth is required and access is denied.

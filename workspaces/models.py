@@ -7,12 +7,18 @@ class Workspace(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user_id = models.UUIDField(null=True, blank=True)
     title = models.CharField(max_length=255)
-    topic_slug = models.SlugField(max_length=255, unique=True)
+    topic_slug = models.SlugField(max_length=255)
     created_at = models.DateTimeField(auto_now_add=True)
     last_panel_html_url = models.CharField(max_length=512, blank=True, default="")
 
     class Meta:
         ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user_id", "topic_slug"],
+                name="unique_topic_slug_per_user",
+            )
+        ]
 
     def to_dict(self):
         """Serialize the workspace for API responses."""

@@ -121,6 +121,86 @@ class WorkspaceAPITests(IsolatedStorageTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(Workspace.objects.count(), 1)
 
+    @override_settings(WORKSPACE_AUTH_REQUIRED=True)
+    def test_list_workspaces_requires_auth_when_enabled(self):
+        response = self.client.get("/api/workspaces/")
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["code"], "UNAUTHORIZED")
+
+    @override_settings(WORKSPACE_AUTH_REQUIRED=True)
+    def test_create_workspace_requires_auth_when_enabled(self):
+        response = self.client.post(
+            "/api/workspaces/",
+            data=json.dumps({"title": "Fluid", "topic_slug": "fluid-mechanics"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 401)
+
+    @override_settings(WORKSPACE_AUTH_REQUIRED=True)
+    def test_create_workspace_sets_user_id_from_cookie(self):
+        user_id = uuid.uuid4()
+        self.client.cookies["user_id"] = str(user_id)
+        response = self.client.post(
+            "/api/workspaces/",
+            data=json.dumps({"title": "Fluid", "topic_slug": "fluid-mechanics"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201)
+        ws = Workspace.objects.get(pk=response.json()["id"])
+        self.assertEqual(ws.user_id, user_id)
+
+    @override_settings(WORKSPACE_AUTH_REQUIRED=True)
+    def test_list_workspaces_filters_by_user(self):
+        user_a = uuid.uuid4()
+        user_b = uuid.uuid4()
+        Workspace.objects.create(
+            title="A", topic_slug="shared-slug", user_id=user_a
+        )
+        Workspace.objects.create(
+            title="B", topic_slug="shared-slug", user_id=user_b
+        )
+
+        self.client.cookies["user_id"] = str(user_a)
+        response = self.client.get("/api/workspaces/")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["title"], "A")
+
+    @override_settings(WORKSPACE_AUTH_REQUIRED=True)
+    def test_create_workspace_dedup_is_per_user(self):
+        user_a = uuid.uuid4()
+        user_b = uuid.uuid4()
+
+        client_a = Client()
+        client_a.cookies["user_id"] = str(user_a)
+        first = client_a.post(
+            "/api/workspaces/",
+            data=json.dumps({"title": "Fluid", "topic_slug": "fluid-mechanics"}),
+            content_type="application/json",
+        )
+        self.assertEqual(first.status_code, 201)
+
+        client_b = Client()
+        client_b.cookies["user_id"] = str(user_b)
+        second = client_b.post(
+            "/api/workspaces/",
+            data=json.dumps({"title": "Fluid", "topic_slug": "fluid-mechanics"}),
+            content_type="application/json",
+        )
+        self.assertEqual(second.status_code, 201)
+        self.assertNotEqual(first.json()["id"], second.json()["id"])
+        self.assertEqual(Workspace.objects.count(), 2)
+
+        again = client_a.post(
+            "/api/workspaces/",
+            data=json.dumps({"title": "Other", "topic_slug": "fluid-mechanics"}),
+            content_type="application/json",
+        )
+        self.assertEqual(again.status_code, 200)
+        self.assertEqual(again.json()["id"], first.json()["id"])
+        self.assertEqual(Workspace.objects.count(), 2)
+
     def test_list_lessons_empty(self):
         ws = Workspace.objects.create(title="Test", topic_slug="test-topic")
 
