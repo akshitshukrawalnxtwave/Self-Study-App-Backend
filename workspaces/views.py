@@ -391,6 +391,7 @@ def get_chat_turn(request, workspace_id, turn_id):
 @xframe_options_exempt
 @require_GET
 def serve_workspace_file(request, workspace_id, file_path):
+    #this function is not getting used anywhere.
     """Serve a workspace file from storage via the stateless file proxy."""
     workspace = _get_workspace_or_404(workspace_id)
     if denied := _authorize_workspace(request, workspace):

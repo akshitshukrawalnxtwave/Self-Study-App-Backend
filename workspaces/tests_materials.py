@@ -56,7 +56,7 @@ class ListMaterialsTests(IsolatedStorageTestCase):
         self.assertEqual(data[0]["path"], "reference/hydrostatics-cheatsheet.html")
         self.assertEqual(
             data[0]["url"],
-            f"/workspaces/{self.ws_id}/reference/hydrostatics-cheatsheet.html",
+            f"/api/workspaces/{self.ws_id}/reference/hydrostatics-cheatsheet.html",
         )
         self.assertEqual(data[1]["kind"], "learning_record")
         self.assertEqual(data[1]["format"], "markdown")
@@ -69,7 +69,7 @@ class ListMaterialsTests(IsolatedStorageTestCase):
 
     def test_serve_root_markdown_via_proxy(self):
         self.storage.write(self.ws_id, "NOTES.md", "# Notes\n")
-        response = Client().get(f"/workspaces/{self.ws_id}/NOTES.md")
+        response = Client().get(f"/api/workspaces/{self.ws_id}/NOTES.md")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Content-Type"], "text/plain; charset=utf-8")
         self.assertIn("# Notes", response.content.decode())

@@ -19,6 +19,7 @@ from django.urls import include, path
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    # Specific /api/workspaces/... routes first; catch-all file proxy after.
     path('api/', include('workspaces.api_urls')),
-    path('', include('workspaces.file_urls')),
+    path('api/', include('workspaces.file_urls')),
 ]

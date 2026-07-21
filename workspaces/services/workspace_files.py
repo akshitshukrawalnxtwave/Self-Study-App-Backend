@@ -84,7 +84,7 @@ def content_type_for_file_path(file_path: str) -> str:
 
 def workspace_asset_base(workspace_id: str) -> str:
     """Root-relative or absolute base for workspace asset URLs."""
-    path = f"/workspaces/{workspace_id}/assets/"
+    path = f"/api/workspaces/{workspace_id}/assets/"
     public = getattr(settings, "WORKSPACES_PUBLIC_BASE_URL", "").rstrip("/")
     if public:
         return f"{public}{path}"
@@ -93,7 +93,7 @@ def workspace_asset_base(workspace_id: str) -> str:
 
 def rewrite_workspace_asset_refs(html: str, workspace_id: str) -> str:
     """
-    Rewrite relative asset links to /workspaces/{id}/assets/... so CSS/JS load
+    Rewrite relative asset links to /api/workspaces/{id}/assets/... so CSS/JS load
     via the Vite proxy (or Django directly) regardless of iframe origin.
     """
     asset_base = workspace_asset_base(workspace_id)
@@ -110,7 +110,13 @@ def rewrite_workspace_asset_refs(html: str, workspace_id: str) -> str:
         flags=re.IGNORECASE,
     )
     html = re.sub(
-        rf'((?:href|src)=["\'])https?://[^"\']*/workspaces/{re.escape(workspace_id)}/assets/([^"?]+)(?:\?[^"\']*)?(["\'])',
+        rf'((?:href|src)=["\'])(?:/api)?/workspaces/{re.escape(workspace_id)}/assets/',
+        rf"\1{asset_base}",
+        html,
+        flags=re.IGNORECASE,
+    )
+    html = re.sub(
+        rf'((?:href|src)=["\'])https?://[^"\']*/(?:api/)?workspaces/{re.escape(workspace_id)}/assets/([^"?]+)(?:\?[^"\']*)?(["\'])',
         rf"\1{asset_base}\2\3",
         html,
         flags=re.IGNORECASE,

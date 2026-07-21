@@ -20,11 +20,15 @@ def normalize_lesson_path(workspace_id: str, stored: str | None) -> str | None:
     if stored.startswith("lessons/") and stored.endswith(".html"):
         return stored
 
-    server_prefix = f"/workspaces/{workspace_id}/"
-    if stored.startswith(server_prefix):
-        path = stored[len(server_prefix) :]
-        if path.startswith("lessons/") and path.endswith(".html"):
-            return path
+    for server_prefix in (
+        f"/api/workspaces/{workspace_id}/",
+        f"/workspaces/{workspace_id}/",
+    ):
+        if stored.startswith(server_prefix):
+            path = stored[len(server_prefix) :]
+            if path.startswith("lessons/") and path.endswith(".html"):
+                return path
+            break
 
     from django.conf import settings
 

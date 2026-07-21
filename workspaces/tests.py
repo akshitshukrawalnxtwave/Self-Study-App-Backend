@@ -161,7 +161,7 @@ class WorkspaceAPITests(IsolatedStorageTestCase):
             content_type="application/json",
         )
         ws_id = create.json()["id"]
-        response = self.client.get(f"/workspaces/{ws_id}/assets/lesson.css")
+        response = self.client.get(f"/api/workspaces/{ws_id}/assets/lesson.css")
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/css", response["Content-Type"])
 
@@ -172,7 +172,7 @@ class WorkspaceAPITests(IsolatedStorageTestCase):
             content_type="application/json",
         )
         ws_id = create.json()["id"]
-        response = self.client.get(f"/workspaces/{ws_id}/../secret.txt")
+        response = self.client.get(f"/api/workspaces/{ws_id}/../secret.txt")
         self.assertIn(response.status_code, (403, 404))
 
     def test_workspace_manifest_includes_all_storage_files_and_version_changes(self):
@@ -238,7 +238,7 @@ class WorkspaceAPITests(IsolatedStorageTestCase):
         urls = response.json()["urls"]
         self.assertEqual(len(urls), 1)
         self.assertEqual(urls[0]["path"], "assets/lesson.css")
-        self.assertEqual(urls[0]["url"], f"/workspaces/{ws_id}/assets/lesson.css")
+        self.assertEqual(urls[0]["url"], f"/api/workspaces/{ws_id}/assets/lesson.css")
         self.assertEqual(urls[0]["expires_in"], 3600)
 
 
@@ -409,11 +409,11 @@ class S3WorkspaceStorageTests(IsolatedStorageTestCase):
     def test_file_url_returns_proxy_path_for_html(self):
         self.storage.write(self.ws_id, "lessons/0001.html", "<html>hi</html>")
         url = self.storage.file_url(self.ws_id, "lessons/0001.html")
-        self.assertEqual(url, f"/workspaces/{self.ws_id}/lessons/0001.html")
+        self.assertEqual(url, f"/api/workspaces/{self.ws_id}/lessons/0001.html")
 
     def test_file_url_returns_proxy_path_for_assets(self):
         url = self.storage.file_url(self.ws_id, "assets/lesson.css")
-        self.assertEqual(url, f"/workspaces/{self.ws_id}/assets/lesson.css")
+        self.assertEqual(url, f"/api/workspaces/{self.ws_id}/assets/lesson.css")
 
     def test_manifest_file_info_uses_s3_metadata(self):
         self.storage.write(self.ws_id, "assets/lesson.css", "body {}")
@@ -499,7 +499,7 @@ class S3WorkspaceStorageTests(IsolatedStorageTestCase):
         detail = http.get(f"/api/workspaces/{ws_id}/lessons/{lesson.id}/")
         self.assertEqual(detail.status_code, 200)
         html_url = detail.json()["html_url"]
-        self.assertEqual(html_url, f"/workspaces/{ws_id}/lessons/0001-demo.html")
+        self.assertEqual(html_url, f"/api/workspaces/{ws_id}/lessons/0001-demo.html")
 
     def test_api_create_and_serve_via_s3(self):
         reset_storage()
@@ -516,7 +516,7 @@ class S3WorkspaceStorageTests(IsolatedStorageTestCase):
         self.assertIsInstance(storage, S3WorkspaceStorage)
         self.assertTrue(storage.exists(ws_id, "assets/lesson.css"))
 
-        served = http.get(f"/workspaces/{ws_id}/assets/lesson.css")
+        served = http.get(f"/api/workspaces/{ws_id}/assets/lesson.css")
         self.assertEqual(served.status_code, 200)
         self.assertEqual(served["Content-Type"], "text/css; charset=utf-8")
         self.assertIn("Cache-Control", served)
@@ -532,7 +532,7 @@ class S3WorkspaceStorageTests(IsolatedStorageTestCase):
         )
         Workspace.objects.create(title="Ref", topic_slug=f"ref-{ws_id[:8]}", id=ws_id)
 
-        served = http.get(f"/workspaces/{ws_id}/reference/series-and-dataframe.html")
+        served = http.get(f"/api/workspaces/{ws_id}/reference/series-and-dataframe.html")
         self.assertEqual(served.status_code, 200)
         self.assertEqual(served["Content-Type"], "text/html; charset=utf-8")
 
@@ -543,7 +543,7 @@ class S3WorkspaceStorageTests(IsolatedStorageTestCase):
         self.storage.write(ws_id, "MISSION.md", "# Mission\n")
         Workspace.objects.create(title="Mission", topic_slug=f"mission-{ws_id[:8]}", id=ws_id)
 
-        response = http.get(f"/workspaces/{ws_id}/MISSION.md")
+        response = http.get(f"/api/workspaces/{ws_id}/MISSION.md")
         self.assertEqual(response.status_code, 403)
 
 
@@ -587,7 +587,7 @@ class CloudStorageTests(IsolatedStorageTestCase):
             self.assertIsInstance(storage, CloudWorkspaceStorage)
             self.assertTrue(storage.exists(ws_id, "assets/lesson.css"))
 
-            served = http.get(f"/workspaces/{ws_id}/assets/lesson.css")
+            served = http.get(f"/api/workspaces/{ws_id}/assets/lesson.css")
             self.assertEqual(served.status_code, 200)
             self.assertIn("text/css", served["Content-Type"])
 

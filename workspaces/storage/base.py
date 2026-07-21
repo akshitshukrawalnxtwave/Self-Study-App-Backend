@@ -49,7 +49,7 @@ class WorkspaceStorage(ABC):
     def file_url(self, workspace_id: str, path: str) -> str:
         """Public proxy URL for a workspace file."""
         normalized = path.strip("/")
-        rel = f"/workspaces/{workspace_id}/{normalized}"
+        rel = f"/api/workspaces/{workspace_id}/{normalized}"
         base = getattr(settings, "WORKSPACES_PUBLIC_BASE_URL", "").rstrip("/")
         if base:
             return f"{base}{rel}"

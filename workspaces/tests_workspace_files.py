@@ -16,7 +16,7 @@ class WorkspaceFileUrlTests(IsolatedStorageTestCase):
         storage = get_storage()
         ws_id = "abc-123"
         url = storage.file_url(ws_id, "lessons/0001.html")
-        self.assertEqual(url, "/workspaces/abc-123/lessons/0001.html")
+        self.assertEqual(url, "/api/workspaces/abc-123/lessons/0001.html")
 
     @override_settings(WORKSPACES_PUBLIC_BASE_URL="http://localhost:8000")
     def test_file_url_can_be_absolute_when_configured(self):
@@ -25,7 +25,7 @@ class WorkspaceFileUrlTests(IsolatedStorageTestCase):
         ws_id = "abc-123"
         url = storage.file_url(ws_id, "lessons/0001.html")
         self.assertEqual(
-            url, "http://localhost:8000/workspaces/abc-123/lessons/0001.html"
+            url, "http://localhost:8000/api/workspaces/abc-123/lessons/0001.html"
         )
 
 
@@ -36,8 +36,8 @@ class RewriteAssetRefsTests(TestCase):
             '<script src="../assets/quiz.js"></script>'
         )
         out = rewrite_workspace_asset_refs(html, "ws-1")
-        self.assertIn('href="/workspaces/ws-1/assets/lesson.css"', out)
-        self.assertIn('src="/workspaces/ws-1/assets/quiz.js"', out)
+        self.assertIn('href="/api/workspaces/ws-1/assets/lesson.css"', out)
+        self.assertIn('src="/api/workspaces/ws-1/assets/quiz.js"', out)
 
     def test_rewrites_presigned_s3_asset_urls_to_proxy_paths(self):
         html = (
@@ -45,7 +45,7 @@ class RewriteAssetRefsTests(TestCase):
             'href="https://bucket.s3.amazonaws.com/workspaces/ws-1/assets/lesson.css?X-Amz-Signature=abc">'
         )
         out = rewrite_workspace_asset_refs(html, "ws-1")
-        self.assertIn('href="/workspaces/ws-1/assets/lesson.css"', out)
+        self.assertIn('href="/api/workspaces/ws-1/assets/lesson.css"', out)
         self.assertNotIn("Signature=", out)
 
 
@@ -109,10 +109,10 @@ class ServeWorkspaceHtmlTests(IsolatedStorageTestCase):
         )
         storage.write(ws_id, "assets/lesson.css", "body { color: red; }")
 
-        response = Client().get(f"/workspaces/{ws_id}/lessons/0001-test.html")
+        response = Client().get(f"/api/workspaces/{ws_id}/lessons/0001-test.html")
         self.assertEqual(response.status_code, 200)
         self.assertIn(
-            f'href="/workspaces/{ws_id}/assets/lesson.css"',
+            f'href="/api/workspaces/{ws_id}/assets/lesson.css"',
             response.content.decode(),
         )
         self.assertIn("frame-ancestors", response["Content-Security-Policy"])
@@ -121,7 +121,7 @@ class ServeWorkspaceHtmlTests(IsolatedStorageTestCase):
         ws = Workspace.objects.create(title="Test", topic_slug="asset-backfill")
         ws_id = str(ws.id)
 
-        response = Client().get(f"/workspaces/{ws_id}/assets/lesson.css")
+        response = Client().get(f"/api/workspaces/{ws_id}/assets/lesson.css")
         self.assertEqual(response.status_code, 200)
         self.assertIn("text/css", response["Content-Type"])
         self.assertTrue(get_storage().exists(ws_id, "assets/lesson.css"))
