@@ -7,7 +7,13 @@ from pathlib import Path
 
 from django.conf import settings
 
+from collections.abc import Callable
+
 from workspaces.models import ChatSession, Message, Workspace
+from workspaces.services.progress import (
+    DEFAULT_RUNNING,
+    status_message_from_sdk_message,
+)
 from workspaces.services.response_mapper import AgentTurnResult, map_turn
 from workspaces.services.seeding import SAMPLE_LESSON_HTML
 from workspaces.storage import (
@@ -20,6 +26,8 @@ from workspaces.storage import (
 
 from claude_agent_sdk import ClaudeAgentOptions
 from claude_agent_sdk.types import AssistantMessage, ResultMessage, TextBlock
+
+ProgressCallback = Callable[[str], None]
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +54,19 @@ def _debug_log(hypothesis_id: str, location: str, message: str, data: dict | Non
     # #endregion
 
 APP_SYSTEM_PROMPT = (
-    "You are the teaching backend for a self-study app. "
-    "The user sees chat on the left and a lesson pane on the right."
+    "You are a teacher in a self-study app. The student chats with you on the left "
+    "and reads lessons on the right pane.\n\n"
+    "Chat rules:\n"
+    "- Speak like a teacher talking to a student — warm, clear, and focused on the topic.\n"
+    "- Never narrate your internal process: do not mention checking the workspace, "
+    "reading or writing files, MISSION.md, assets, CSS themes, tools, or upcoming steps.\n"
+    "- Do that work silently with your tools; the student only sees your teaching.\n"
+    "- Ask questions in plain language (e.g. \"What do you want to build with C++?\"), "
+    "not as meta commentary about missing documents.\n"
+    "- When you publish a lesson, say so simply (e.g. \"I've put a first lesson on the "
+    "right — read through it and tell me what you'd like to go deeper on\").\n"
+    "- A leading `[Context: ...]` block in the user message is app-supplied viewer "
+    "state (which lesson is open), not something the student typed."
 )
 
 
@@ -82,11 +101,19 @@ class AgentService:
         workspace: Workspace,
         session: ChatSession,
         user_content: str,
+        on_progress: ProgressCallback | None = None,
+        current_lesson_path: str | None = None,
     ) -> AgentTurnResult:
         """Run one chat turn: hydrate cache, invoke agent, sync files, map artifacts."""
         storage = get_storage()
         workspace_id = str(workspace.id)
         use_cache = uses_agent_cache() and not settings.AGENT_FIXTURE_MODE
+
+        def report(message: str) -> None:
+            if on_progress and message:
+                on_progress(message)
+
+        report("Preparing your workspace…")
 
         # Agent SDK needs a real filesystem cwd. Hydrate workspaces_data/ when needed.
         if use_cache:
@@ -106,15 +133,24 @@ class AgentService:
                 "permission_mode": settings.AGENT_PERMISSION_MODE,
                 "before_files": sorted(before.keys()),
                 "before_count": len(before),
+                "current_lesson_path": current_lesson_path,
             },
         )
         # #endregion
 
         if settings.AGENT_FIXTURE_MODE:
+            report(DEFAULT_RUNNING)
             result = self._fixture_turn(workspace, session, user_content, storage)
         else:
-            result = self._run_with_timeout(workspace, session, user_content)
+            result = self._run_with_timeout(
+                workspace,
+                session,
+                user_content,
+                on_progress=report,
+                current_lesson_path=current_lesson_path,
+            )
 
+        report("Finishing up…")
         if use_cache:
             after = agent_cache_snapshot(workspace_id)
             uploaded = sync_agent_cache_to_remote(workspace_id)
@@ -156,13 +192,23 @@ class AgentService:
         return turn_result
 
     def _run_with_timeout(
-        self, workspace: Workspace, session: ChatSession, user_content: str
+        self,
+        workspace: Workspace,
+        session: ChatSession,
+        user_content: str,
+        on_progress: ProgressCallback | None = None,
+        current_lesson_path: str | None = None,
     ):
         """Run the SDK turn in a worker thread, enforcing the configured timeout."""
         timeout = settings.AGENT_TIMEOUT_SECONDS
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(
-                self._sdk_turn, workspace, session, user_content
+                self._sdk_turn,
+                workspace,
+                session,
+                user_content,
+                on_progress,
+                current_lesson_path,
             )
             try:
                 return future.result(timeout=timeout)
@@ -220,8 +266,18 @@ class AgentService:
         """Local filesystem path used as the agent's working directory (cwd)."""
         return str(Path(settings.WORKSPACES_ROOT) / str(workspace.id))
 
-    def _build_sdk_prompt(self, user_content: str) -> str:
+    def _build_sdk_prompt(
+        self, user_content: str, current_lesson_path: str | None = None
+    ) -> str:
         """Wrap the user message in the /teach skill command."""
+        if current_lesson_path:
+            return (
+                f"/teach [Context: the student is currently viewing "
+                f"`{current_lesson_path}` in the lesson pane. "
+                f'When they say "this", "here", or ask to be quizzed '
+                f"without naming a lesson, use that file.]\n\n"
+                f"{user_content}"
+            )
         return f"/teach {user_content}"
 
     def _build_sdk_options(self, workspace: Workspace, session: ChatSession):
@@ -324,7 +380,12 @@ class AgentService:
             session.save(update_fields=["sdk_session_id"])
 
     def _sdk_turn(
-        self, workspace: Workspace, session: ChatSession, user_content: str
+        self,
+        workspace: Workspace,
+        session: ChatSession,
+        user_content: str,
+        on_progress: ProgressCallback | None = None,
+        current_lesson_path: str | None = None,
     ):
         """Execute one turn against the Claude Agent SDK and return its text."""
         try:
@@ -335,7 +396,9 @@ class AgentService:
                 "Claude Agent SDK not installed. Set AGENT_FIXTURE_MODE=true."
             ) from exc
 
-        prompt = self._build_sdk_prompt(user_content)
+        prompt = self._build_sdk_prompt(
+            user_content, current_lesson_path=current_lesson_path
+        )
         options = self._build_sdk_options(workspace, session)
         logger.info(
             "SDK turn workspace=%s provider=%s effective=%s model=%s resume=%s",
@@ -347,6 +410,26 @@ class AgentService:
         )
         collected_messages: list = []
         sdk_session_id: str | None = session.sdk_session_id or None
+        last_progress: str | None = None
+
+        def report(message: str) -> None:
+            """Sync progress update (safe outside the asyncio loop)."""
+            nonlocal last_progress
+            if not on_progress or not message or message == last_progress:
+                return
+            last_progress = message
+            on_progress(message)
+
+        async def report_async(message: str) -> None:
+            """Progress update from the SDK async stream (ORM must not run on the loop)."""
+            nonlocal last_progress
+            if not on_progress or not message or message == last_progress:
+                return
+            last_progress = message
+            # Django ORM is sync-only; offload so we don't abort the agent stream.
+            await asyncio.to_thread(on_progress, message)
+
+        report(DEFAULT_RUNNING)
 
         async def _collect():
             nonlocal sdk_session_id
@@ -355,6 +438,9 @@ class AgentService:
                 message_session_id = getattr(message, "session_id", None)
                 if message_session_id:
                     sdk_session_id = message_session_id
+                progress = status_message_from_sdk_message(message)
+                if progress:
+                    await report_async(progress)
 
         try:
             asyncio.run(_collect())

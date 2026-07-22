@@ -179,13 +179,22 @@ WORKSPACES_PUBLIC_BASE_URL = os.environ.get(
     'WORKSPACES_PUBLIC_BASE_URL', ''
 ).rstrip('/')
 CORS_ALLOWED_ORIGINS = [
-    origin.strip()
+    # rstrip('/') so a stray trailing slash in the env value still matches the
+    # browser Origin header (which never has a trailing slash).
+    origin.strip().rstrip('/')
     for origin in os.environ.get(
         'CORS_ALLOWED_ORIGINS',
         'http://localhost:5173,http://127.0.0.1:5173',
     ).split(',')
     if origin.strip()
 ]
+# Frontend calls the API cross-origin with credentials: 'include', so the
+# preflight response must carry Access-Control-Allow-Credentials: true. This
+# requires exact-origin allow-listing above (never '*').
+CORS_ALLOW_CREDENTIALS = True
+# Allow the per-browser identity header on cross-origin requests.
+from corsheaders.defaults import default_headers  # noqa: E402
+CORS_ALLOW_HEADERS = (*default_headers, "x-user-id")
 
 # Agent LLM provider:
 #   anthropic     — Claude API (ANTHROPIC_API_KEY)

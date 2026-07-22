@@ -94,7 +94,9 @@ class ChatTurn(models.Model):
     status = models.CharField(
         max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING
     )
+    status_message = models.CharField(max_length=255, blank=True, default="")
     user_content = models.TextField()
+    current_lesson_path = models.CharField(max_length=512, blank=True, default="")
     result = models.JSONField(null=True, blank=True)
     error_message = models.TextField(blank=True, default="")
     error_code = models.CharField(max_length=64, blank=True, default="")
@@ -110,6 +112,10 @@ class ChatTurn(models.Model):
             "turn_id": str(self.id),
             "status": self.status,
         }
+        if self.status in (self.STATUS_PENDING, self.STATUS_RUNNING):
+            payload["status_message"] = self.status_message or (
+                "Queued…" if self.status == self.STATUS_PENDING else "Working on your request…"
+            )
         if self.status == self.STATUS_COMPLETED and self.result is not None:
             payload.update(self.result)
         elif self.status == self.STATUS_FAILED:
