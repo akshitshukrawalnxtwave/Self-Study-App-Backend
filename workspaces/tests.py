@@ -8,7 +8,7 @@ from pathlib import Path
 from django.test import Client, TestCase, TransactionTestCase, override_settings
 from moto import mock_aws
 
-from workspaces.models import ChatSession, Lesson, Workspace
+from workspaces.models import ChatSession, ChatTurn, Lesson, Workspace
 from workspaces.services.agent import agent_service
 from workspaces.storage import (
     agent_cache_is_warm,
@@ -413,6 +413,192 @@ class WorkspaceChatPollingTests(IsolatedStorageTransactionTestCase):
             detail.json()["html_url"].endswith("lessons/0001-getting-started.html")
         )
 
+    def test_chat_persists_current_lesson_path(self):
+        create = self.client.post(
+            "/api/workspaces/",
+            data=json.dumps({"title": "LessonCtx", "topic_slug": "lesson-ctx"}),
+            content_type="application/json",
+        )
+        ws_id = create.json()["id"]
+        lesson_path = "lessons/0001-intro.html"
+        get_storage().write(ws_id, lesson_path, "<html>intro</html>")
+
+        started = self.client.post(
+            f"/api/workspaces/{ws_id}/chat/",
+            data=json.dumps(
+                {
+                    "content": "quiz me on this",
+                    "current_lesson_path": lesson_path,
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(started.status_code, 202)
+        turn_id = started.json()["turn_id"]
+        turned = _poll_turn(self.client, ws_id, turn_id)
+        self.assertEqual(turned.status_code, 200)
+        self.assertEqual(turned.json()["status"], "completed")
+
+        turn = ChatTurn.objects.get(pk=turn_id)
+        self.assertEqual(turn.current_lesson_path, lesson_path)
+        workspace = Workspace.objects.get(pk=ws_id)
+        self.assertEqual(workspace.last_panel_html_url, lesson_path)
+
+        messages = self.client.get(f"/api/workspaces/{ws_id}/messages/").json()
+        self.assertEqual(messages[0]["content"], "quiz me on this")
+
+    def test_chat_rejects_invalid_current_lesson_path(self):
+        create = self.client.post(
+            "/api/workspaces/",
+            data=json.dumps({"title": "BadPath", "topic_slug": "bad-path"}),
+            content_type="application/json",
+        )
+        ws_id = create.json()["id"]
+
+        traversal = self.client.post(
+            f"/api/workspaces/{ws_id}/chat/",
+            data=json.dumps(
+                {
+                    "content": "quiz me",
+                    "current_lesson_path": "../secret.txt",
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(traversal.status_code, 400)
+        self.assertEqual(traversal.json()["code"], "VALIDATION_ERROR")
+
+        outside = self.client.post(
+            f"/api/workspaces/{ws_id}/chat/",
+            data=json.dumps(
+                {
+                    "content": "quiz me",
+                    "current_lesson_path": "assets/quiz.js",
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(outside.status_code, 400)
+
+        missing = self.client.post(
+            f"/api/workspaces/{ws_id}/chat/",
+            data=json.dumps(
+                {
+                    "content": "quiz me",
+                    "current_lesson_path": "lessons/missing.html",
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(missing.status_code, 400)
+        self.assertIn("does not exist", missing.json()["error"])
+
+
+class ChatTurnStatusMessageTests(IsolatedStorageTransactionTestCase):
+    """Polling responses expose a live status_message while the turn runs."""
+
+    def test_chat_start_includes_queued_status_message(self):
+        create = self.client.post(
+            "/api/workspaces/",
+            data=json.dumps({"title": "Status", "topic_slug": "status-msg"}),
+            content_type="application/json",
+        )
+        ws_id = create.json()["id"]
+
+        started = self.client.post(
+            f"/api/workspaces/{ws_id}/chat/",
+            data=json.dumps({"content": "Hello"}),
+            content_type="application/json",
+        )
+        self.assertEqual(started.status_code, 202)
+        body = started.json()
+        self.assertEqual(body["status"], "pending")
+        self.assertEqual(body["status_message"], "Queued…")
+
+        # Early poll may be pending or running; both should include status_message.
+        early = self.client.get(
+            f"/api/workspaces/{ws_id}/chat/{body['turn_id']}/"
+        )
+        self.assertEqual(early.status_code, 200)
+        early_body = early.json()
+        if early_body["status"] in ("pending", "running"):
+            self.assertIn("status_message", early_body)
+            self.assertTrue(early_body["status_message"])
+
+        done = _poll_turn(self.client, ws_id, body["turn_id"])
+        self.assertEqual(done.json()["status"], "completed")
+        self.assertNotIn("status_message", done.json())
+
+
+class ProgressMessageUnitTests(TestCase):
+    def test_message_for_tool_maps_lesson_write(self):
+        from workspaces.services.progress import message_for_tool
+
+        self.assertEqual(
+            message_for_tool("Write", {"file_path": "lessons/0001-intro.html"}),
+            "Writing a lesson…",
+        )
+        self.assertEqual(
+            message_for_tool("Read", {"file_path": "MISSION.md"}),
+            "Reviewing your goals…",
+        )
+        self.assertEqual(
+            message_for_tool("Grep", {"pattern": "foo"}),
+            "Searching your materials…",
+        )
+
+    def test_status_message_from_assistant_tool_use(self):
+        from types import SimpleNamespace
+
+        from workspaces.services.progress import status_message_from_sdk_message
+
+        block = SimpleNamespace(
+            name="Edit",
+            input={"file_path": "lessons/0002.html"},
+        )
+        message = SimpleNamespace(content=[block])
+        self.assertEqual(
+            status_message_from_sdk_message(message),
+            "Writing a lesson…",
+        )
+
+
+class ResponseMapperPanelTests(TestCase):
+    def test_panel_opens_first_newly_created_lesson(self):
+        from workspaces.services.response_mapper import map_turn
+
+        before = {
+            "lessons/0001-a.html": 1.0,
+            "lessons/0002-b.html": 1.0,
+        }
+        after = {
+            "lessons/0001-a.html": 1.0,
+            "lessons/0002-b.html": 1.0,
+            "lessons/0003-c.html": 2.0,
+            "lessons/0004-d.html": 2.0,
+        }
+        result = map_turn(
+            "ws-id",
+            "Here are two new lessons.",
+            before,
+            after,
+            previous_panel_url="lessons/0002-b.html",
+        )
+        self.assertEqual(result.panel_lesson_path, "lessons/0003-c.html")
+        self.assertTrue(result.panel_html_url.endswith("lessons/0003-c.html"))
+
+    def test_panel_prefers_created_over_updated_lesson(self):
+        from workspaces.services.response_mapper import map_turn
+
+        before = {"lessons/0001-a.html": 1.0, "lessons/0002-b.html": 1.0}
+        after = {
+            "lessons/0001-a.html": 1.0,
+            "lessons/0002-b.html": 2.0,
+            "lessons/0003-c.html": 2.0,
+        }
+        result = map_turn("ws-id", "ok", before, after, "lessons/0002-b.html")
+        self.assertEqual(result.panel_lesson_path, "lessons/0003-c.html")
+
 
 class AgentServiceTests(IsolatedStorageTestCase):
     def setUp(self):
@@ -424,6 +610,18 @@ class AgentServiceTests(IsolatedStorageTestCase):
     def test_build_sdk_prompt_prefixes_teach(self):
         prompt = agent_service._build_sdk_prompt("I want to learn physics")
         self.assertEqual(prompt, "/teach I want to learn physics")
+
+    def test_build_sdk_prompt_includes_current_lesson_context(self):
+        prompt = agent_service._build_sdk_prompt(
+            "quiz me on this",
+            current_lesson_path="lessons/0003-intro.html",
+        )
+        self.assertTrue(prompt.startswith("/teach [Context:"))
+        self.assertIn("`lessons/0003-intro.html`", prompt)
+        self.assertIn("quiz me on this", prompt)
+        self.assertNotEqual(
+            prompt, "/teach quiz me on this"
+        )
 
     def test_build_sdk_options_enables_teach_skill(self):
         workspace = Workspace.objects.create(title="Test", topic_slug="test-skill")

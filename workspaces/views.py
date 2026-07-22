@@ -6,6 +6,7 @@ import uuid
 from django.conf import settings
 from django.db import close_old_connections, transaction
 from django.http import Http404, HttpResponse, JsonResponse
+from django.utils import timezone
 from django.views.decorators.clickjacking import xframe_options_exempt
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods
@@ -58,6 +59,45 @@ def _get_active_session(workspace: Workspace) -> ChatSession:
     if session:
         return session
     return ChatSession.objects.create(workspace=workspace, is_active=True)
+
+
+def _resolve_current_lesson_path(
+    workspace: Workspace, raw_path
+) -> tuple[str | None, JsonResponse | None]:
+    """Validate optional current_lesson_path from the chat body.
+
+    Returns (normalized_path_or_None, error_response_or_None).
+    Missing/blank is allowed; invalid or missing files return 400.
+    """
+    if raw_path is None:
+        return None, None
+    if not isinstance(raw_path, str):
+        return None, error_response(
+            "current_lesson_path must be a string", "VALIDATION_ERROR", 400
+        )
+    stripped = raw_path.strip()
+    if not stripped:
+        return None, None
+
+    normalized = validate_workspace_storage_path(stripped)
+    if (
+        normalized is None
+        or not normalized.startswith("lessons/")
+        or not normalized.endswith(".html")
+    ):
+        return None, error_response(
+            "current_lesson_path must be a lessons/*.html path",
+            "VALIDATION_ERROR",
+            400,
+        )
+
+    if not get_storage().exists(str(workspace.id), normalized):
+        return None, error_response(
+            "current_lesson_path does not exist in this workspace",
+            "VALIDATION_ERROR",
+            400,
+        )
+    return normalized, None
 
 
 @require_GET
@@ -266,21 +306,48 @@ def _execute_chat_turn(turn_id: uuid.UUID) -> None:
     try:
         turn = ChatTurn.objects.select_related("workspace", "session").get(pk=turn_id)
         turn.status = ChatTurn.STATUS_RUNNING
-        turn.save(update_fields=["status", "updated_at"])
+        turn.status_message = "Working on your request…"
+        turn.save(update_fields=["status", "status_message", "updated_at"])
 
         workspace = turn.workspace
         session = turn.session
+
+        def on_progress(message: str) -> None:
+            """Persist the latest activity label for polling clients.
+
+            Called from a worker thread (never directly on the asyncio loop).
+            """
+            try:
+                close_old_connections()
+                ChatTurn.objects.filter(pk=turn_id).exclude(
+                    status__in=(ChatTurn.STATUS_COMPLETED, ChatTurn.STATUS_FAILED)
+                ).update(status_message=message[:255], updated_at=timezone.now())
+            except Exception:
+                logger.exception(
+                    "Failed to update status_message for chat turn %s", turn_id
+                )
+            finally:
+                close_old_connections()
+
         try:
-            result = agent_service.run_turn(workspace, session, turn.user_content)
+            result = agent_service.run_turn(
+                workspace,
+                session,
+                turn.user_content,
+                on_progress=on_progress,
+                current_lesson_path=turn.current_lesson_path or None,
+            )
         except AgentTimeoutError as exc:
             turn.status = ChatTurn.STATUS_FAILED
             turn.error_message = str(exc)
             turn.error_code = "AGENT_TIMEOUT"
+            turn.status_message = ""
             turn.save(
                 update_fields=[
                     "status",
                     "error_message",
                     "error_code",
+                    "status_message",
                     "updated_at",
                 ]
             )
@@ -289,11 +356,13 @@ def _execute_chat_turn(turn_id: uuid.UUID) -> None:
             turn.status = ChatTurn.STATUS_FAILED
             turn.error_message = str(exc)
             turn.error_code = "INTERNAL_ERROR"
+            turn.status_message = ""
             turn.save(
                 update_fields=[
                     "status",
                     "error_message",
                     "error_code",
+                    "status_message",
                     "updated_at",
                 ]
             )
@@ -303,11 +372,13 @@ def _execute_chat_turn(turn_id: uuid.UUID) -> None:
             turn.status = ChatTurn.STATUS_FAILED
             turn.error_message = str(exc)
             turn.error_code = "INTERNAL_ERROR"
+            turn.status_message = ""
             turn.save(
                 update_fields=[
                     "status",
                     "error_message",
                     "error_code",
+                    "status_message",
                     "updated_at",
                 ]
             )
@@ -329,7 +400,8 @@ def _execute_chat_turn(turn_id: uuid.UUID) -> None:
 
         turn.result = turn_to_dict(turn.id, result)
         turn.status = ChatTurn.STATUS_COMPLETED
-        turn.save(update_fields=["result", "status", "updated_at"])
+        turn.status_message = ""
+        turn.save(update_fields=["result", "status", "status_message", "updated_at"])
     except Exception:
         logger.exception("Failed to execute chat turn %s", turn_id)
     finally:
@@ -352,6 +424,12 @@ def chat(request, workspace_id):
     if not content:
         return error_response("content is required", "VALIDATION_ERROR", 400)
 
+    current_lesson_path, path_error = _resolve_current_lesson_path(
+        workspace, body.get("current_lesson_path")
+    )
+    if path_error:
+        return path_error
+
     session = _get_active_session(workspace)
 
     Message.objects.create(
@@ -361,11 +439,17 @@ def chat(request, workspace_id):
     )
     session.save(update_fields=["last_active_at"])
 
+    if current_lesson_path and workspace.last_panel_html_url != current_lesson_path:
+        workspace.last_panel_html_url = current_lesson_path
+        workspace.save(update_fields=["last_panel_html_url"])
+
     turn = ChatTurn.objects.create(
         workspace=workspace,
         session=session,
         user_content=content,
+        current_lesson_path=current_lesson_path or "",
         status=ChatTurn.STATUS_PENDING,
+        status_message="Queued…",
     )
 
     turn_id = turn.id
@@ -382,7 +466,11 @@ def chat(request, workspace_id):
     transaction.on_commit(_spawn_turn)
 
     return JsonResponse(
-        {"turn_id": str(turn_id), "status": ChatTurn.STATUS_PENDING},
+        {
+            "turn_id": str(turn_id),
+            "status": ChatTurn.STATUS_PENDING,
+            "status_message": turn.status_message,
+        },
         status=202,
     )
 

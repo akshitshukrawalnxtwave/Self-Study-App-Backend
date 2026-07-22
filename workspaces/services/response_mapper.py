@@ -87,12 +87,19 @@ def latest_lesson_panel(
     artifacts: list[dict],
     previous_stored_path: str | None,
 ) -> tuple[str | None, str | None]:
-    """Return (fresh html_url, relative lesson path) for the lesson panel."""
+    """Return (fresh html_url, relative lesson path) for the lesson panel.
+
+    When a turn creates multiple lessons, open the first new one (e.g. 0003
+    before 0004) so the student starts at the beginning of the new sequence.
+    Prefer created lessons over updated ones; artifacts are already path-sorted.
+    """
     lesson_artifacts = [
         a for a in artifacts if a.get("type") == "lesson" and a.get("path")
     ]
-    if lesson_artifacts:
-        path = lesson_artifacts[-1]["path"]
+    created = [a for a in lesson_artifacts if a.get("action") == "created"]
+    chosen = created[0] if created else (lesson_artifacts[0] if lesson_artifacts else None)
+    if chosen:
+        path = chosen["path"]
         return path, path
 
     previous_path = normalize_lesson_path(workspace_id, previous_stored_path)

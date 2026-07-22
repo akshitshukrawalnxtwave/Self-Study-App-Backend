@@ -27,6 +27,15 @@ def get_request_user_id(request: HttpRequest) -> uuid.UUID | None:
             if user_id is not None:
                 return user_id
 
+    # Cross-origin clients send their per-browser id here (the user_id cookie
+    # cannot cross domains). Client-asserted, unverified — POC-level separation.
+    header_value = request.headers.get("X-User-Id", "").strip()
+    if header_value:
+        try:
+            return uuid.UUID(header_value)
+        except ValueError:
+            return None
+
     cookie_value = request.COOKIES.get("user_id", "").strip()
     if cookie_value:
         try:
